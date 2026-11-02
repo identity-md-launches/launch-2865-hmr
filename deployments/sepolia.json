@@ -1,0 +1,8 @@
+{
+  "chainId": 11155111,
+  "network": "sepolia",
+  "status": "awaiting-network-deployment",
+  "owner": "0x6c14430adacc99e27f6180bc5a74d6768616bf4a",
+  "contracts": {},
+  "note": "The network deployer publishes confirmed application addresses after acceptance. No deployment transaction was sent by this worker. Use tools/record_deployment.py after finality to verify and record actual addresses."
+}

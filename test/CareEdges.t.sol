@@ -26,21 +26,47 @@ contract CareEdgesTest is GameTest {
 
     // ---------------------------------------------------------------- hunger and neglect schedule
 
+    /// @dev DESIGN: a never-fed newborn's hunger clock starts at birth + 72h, though it is gated as hungry.
     function test_newbornNeglectFollowsThePinnedSchedule() public {
         uint256 id = _mint(alice);
         uint256 born = block.timestamp;
         assertEq(_body(id), 50);
+        assertTrue(nft.isHungry(id), "a newborn is hungry for every gate");
         vm.warp(born + 1);
-        assertEq(_body(id), 45, "first begun hungry day");
+        assertEq(_body(id), 50, "no hunger damage inside the newborn's first window");
         vm.warp(born + 1 days - 1);
-        assertEq(_body(id), 45, "still the first hungry day and no complete idle day");
+        assertEq(_body(id), 50);
         vm.warp(born + 1 days);
-        assertEq(_body(id), 40, "first complete idle day");
-        vm.warp(born + 1 days + 1);
-        assertEq(_body(id), 35, "second begun hungry day");
-        vm.warp(born + 2 days);
-        assertEq(_body(id), 30, "second complete idle day");
+        assertEq(_body(id), 45, "first complete idle day");
+        vm.warp(born + 3 days);
+        assertEq(_body(id), 35, "three idle days, still no hunger at birth + 72h exactly");
+        vm.warp(born + 3 days + 1);
+        assertEq(_body(id), 30, "first begun hungry day one second after the newborn window");
+        vm.warp(born + 4 days);
+        assertEq(_body(id), 25, "fourth complete idle day");
+        vm.warp(born + 4 days + 1);
+        assertEq(_body(id), 20, "second begun hungry day");
         assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Obese));
+    }
+
+    /// @dev The newborn window is what makes mint-then-feed-later equal mint-and-feed-now, up to idle days.
+    function testFuzz_feedingAnywhereInTheNewbornWindowCostsOnlyIdleDays(uint32 delaySeed, uint8 tierSeed)
+        public
+    {
+        uint8 tier = uint8(bound(tierSeed, 0, 2));
+        uint256 delay = bound(delaySeed, 0, 72 hours);
+        uint256 id = _mint(alice);
+        vm.warp(vm.getBlockTimestamp() + delay);
+        _feed(alice, id, tier);
+        uint256 food = tier == 0 ? 46 : tier == 1 ? 56 : 62;
+        assertEq(_body(id), food - 5 * (delay / 1 days));
+    }
+
+    function test_feedingOneSecondAfterTheNewbornWindowPaysOneHungerDay() public {
+        uint256 id = _mint(alice);
+        vm.warp(vm.getBlockTimestamp() + 72 hours + 1);
+        _feed(alice, id, 2);
+        assertEq(_body(id), 50 - 15 - 5 + 12);
     }
 
     function test_feedingStopsHungerDamageButNeverRefundsIdleDamage() public {
@@ -162,6 +188,7 @@ contract CareEdgesTest is GameTest {
                 _enqueue(player, id);
             }
         }
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         MatchQueue.Snapshot[] memory racers = queue.roundRacers(round);
         assertEq(racers.length, 8);
@@ -224,6 +251,60 @@ contract CareEdgesTest is GameTest {
             assertEq(_body(id), expectedBody[i]);
             vm.warp(vm.getBlockTimestamp() - nft.TRAIN_SECONDS());
         }
+    }
+
+    function test_lowFoodTrainingStopsAtTheCeilingOfSixty() public {
+        HamsterHarness harness = _harness();
+        assertEq(nft.LOW_FOOD_BODY_CEILING(), 60);
+        uint256[4] memory starts = [uint256(50), 59, 60, 85];
+        uint256[4] memory expected = [uint256(60), 60, 60, 85];
+        for (uint256 i; i < 4; ++i) {
+            address player = makeAddr(string.concat("ceiling", vm.toString(i)));
+            vm.deal(player, 1 ether);
+            uint256 id = _mintFed(player, 0);
+            harness.setBodyForTest(id, starts[i]);
+            _train(player, id);
+            assertEq(_body(id), expected[i], "low food training lifts to 60 at most and never lowers");
+            vm.warp(vm.getBlockTimestamp() - nft.TRAIN_SECONDS());
+        }
+    }
+
+    function testFuzz_lowFoodAloneNeverMakesAPetFit(uint8 rounds) public {
+        uint256 id = _mintFed(alice, 0);
+        uint256 n = bound(rounds, 1, 40);
+        for (uint256 i; i < n; ++i) {
+            if (nft.hamster(id).fedUntil < vm.getBlockTimestamp() + nft.TRAIN_SECONDS()) _feed(alice, id, 0);
+            _train(alice, id);
+            assertLe(_body(id), 60);
+            assertTrue(nft.hamster(id).weight != WeightClass.Fit);
+        }
+    }
+
+    function test_midFoodTrainingPassesSixtyAndReachesFit() public {
+        HamsterHarness harness = _harness();
+        uint256 id = _mintFed(alice, 1);
+        harness.setBodyForTest(id, 60);
+        _train(alice, id); // 60 + 2 + 2 + 10
+        assertEq(_body(id), 74);
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Fit));
+    }
+
+    function test_aFitPetOnACheapDietTrainingDailyDriftsToNormalNotBelow() public {
+        HamsterHarness harness = _harness();
+        uint256 id = _mintFed(alice, 0);
+        harness.setBodyForTest(id, 90);
+        // Back-to-back training takes no idle damage: only the -4 of each low feed (every ~72h) lowers it.
+        for (uint256 i; i < 20; ++i) {
+            if (nft.hamster(id).fedUntil < vm.getBlockTimestamp() + nft.TRAIN_SECONDS()) _feed(alice, id, 0);
+            _train(alice, id);
+        }
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Fit), "five days cost only two feeds");
+        for (uint256 i; i < 60; ++i) {
+            if (nft.hamster(id).fedUntil < vm.getBlockTimestamp() + nft.TRAIN_SECONDS()) _feed(alice, id, 0);
+            _train(alice, id);
+        }
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Normal));
+        assertEq(_body(id), 66, "90 - 6 low feeds; training could not lift it while above 60");
     }
 
     // ---------------------------------------------------------------- feeding
@@ -341,15 +422,99 @@ contract CareEdgesTest is GameTest {
         assertEq(GameMath.trainingGain(type(uint256).max, 50_000), 5, "largest configurable multiplier");
     }
 
-    /// @dev Bounded at 909: from 910 up the mid tier rounds down to the low tier's gain. That is reported in
-    ///      .imd-findings.json rather than asserted here as correct.
-    function testFuzz_foodTiersStrictlyOrderTheGainBelowTheFloor(uint256 staminaSeed) public view {
-        uint256 stamina = bound(staminaSeed, 0, 909);
-        uint256 low = GameMath.trainingGain(stamina, nft.foodTrainBps(0));
-        uint256 mid = GameMath.trainingGain(stamina, nft.foodTrainBps(1));
-        uint256 high = GameMath.trainingGain(stamina, nft.foodTrainBps(2));
+    /// @dev Below 240 (base >= 3) the chained floor must change nothing: the tiers are the plain products.
+    function testFuzz_chainedFloorIsInvisibleWhileTheBaseIsAtLeastThree(uint256 staminaSeed) public view {
+        uint256 stamina = bound(staminaSeed, 0, 239);
+        uint256[3] memory bps = [nft.foodTrainBps(0), nft.foodTrainBps(1), nft.foodTrainBps(2)];
+        for (uint8 t; t < 3; ++t) {
+            assertEq(GameMath.tieredTrainingGain(stamina, bps, t), GameMath.trainingGain(stamina, bps[t]));
+        }
+    }
+
+    /// @dev The earlier tier collapse (mid == low from stamina 910) must stay fixed at every stamina, for the
+    ///      default configuration and every configuration setFoodConfig accepts.
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_foodTiersStrictlyOrderTheGainForEveryAcceptedConfig(
+        uint256 stamina,
+        uint256 b0,
+        uint256 b1,
+        uint256 b2
+    ) public view {
+        b0 = bound(b0, 10_000, 49_998);
+        b1 = bound(b1, b0 + 1, 49_999);
+        b2 = bound(b2, b1 + 1, 50_000);
+        uint256[3] memory bps = [b0, b1, b2];
+        uint256 low = GameMath.tieredTrainingGain(stamina, bps, 0);
+        uint256 mid = GameMath.tieredTrainingGain(stamina, bps, 1);
+        uint256 high = GameMath.tieredTrainingGain(stamina, bps, 2);
+        assertGe(low, 1);
         assertLt(low, mid);
         assertLt(mid, high);
+        assertGe(mid, GameMath.trainingGain(stamina, b1), "the floor never lowers a captured multiplier");
+        assertGe(high, GameMath.trainingGain(stamina, b2));
+        uint256[3] memory defaults = [nft.foodTrainBps(0), nft.foodTrainBps(1), nft.foodTrainBps(2)];
+        assertLt(
+            GameMath.tieredTrainingGain(stamina, defaults, 0),
+            GameMath.tieredTrainingGain(stamina, defaults, 1)
+        );
+        assertLt(
+            GameMath.tieredTrainingGain(stamina, defaults, 1),
+            GameMath.tieredTrainingGain(stamina, defaults, 2)
+        );
+    }
+
+    function test_tieredGainTableAtTheDocumentedStaminas() public pure {
+        uint256[3] memory d = [uint256(10_000), 15_000, 20_000];
+        uint256[3] memory s = [uint256(10), 909, 910];
+        uint256[3][3] memory expected = [[uint256(10), 15, 20], [uint256(2), 3, 4], [uint256(1), 2, 3]];
+        for (uint256 i; i < 3; ++i) {
+            for (uint8 t; t < 3; ++t) {
+                assertEq(GameMath.tieredTrainingGain(s[i], d, t), expected[i][t]);
+            }
+            assertEq(GameMath.tieredTrainingGain(type(uint256).max, d, 2), 3);
+        }
+    }
+
+    function test_tieredGainRejectsATierAboveTwo() public {
+        uint256[3] memory d = [uint256(10_000), 15_000, 20_000];
+        vm.expectRevert(GameMath.InvalidTier.selector);
+        this.tieredGainExternal(10, d, 3);
+    }
+
+    function tieredGainExternal(uint256 stamina, uint256[3] memory bps, uint8 tier)
+        external
+        pure
+        returns (uint256)
+    {
+        return GameMath.tieredTrainingGain(stamina, bps, tier);
+    }
+
+    /// @dev Real path at stamina 910: each tier's pet is credited its chained gain.
+    function test_realPetsAtTheBaseFloorGainOneTwoThree() public {
+        HamsterHarness harness = _harness();
+        address[3] memory players = [alice, bob, carol];
+        for (uint8 t; t < 3; ++t) {
+            uint256 id = _mintFed(players[t], t);
+            harness.setStaminaForTest(id, 910);
+            _train(players[t], id);
+            assertEq(nft.hamster(id).stamina, 910 + 1 + t);
+            vm.warp(vm.getBlockTimestamp() - nft.TRAIN_SECONDS());
+        }
+    }
+
+    /// @dev Owner raises the low tier above a mid pet's captured multiplier: the mid pet is lifted to stay strictly
+    ///      above low food, never lowered.
+    function test_reconfigLiftsAStaleMidPetAboveTheNewLowTier() public {
+        uint256 id = _mintFed(alice, 1);
+        assertEq(nft.previewTrainingGain(id), 15);
+        vm.prank(owner);
+        nft.setFoodConfig([uint256(1), 2, 3], [uint256(20_000), 30_000, 40_000]);
+        assertEq(nft.hamster(id).trainBps, 15_000, "the captured multiplier is unchanged");
+        assertEq(nft.previewTrainingGain(id), 21, "max(15, 20 + 1)");
+        vm.prank(alice);
+        nft.startTraining(id);
+        (, uint256 gain,) = nft.training(id);
+        assertEq(gain, 21);
     }
 
     function testFuzz_foodNeverLowersTheGainAtAnyStamina(uint256 stamina) public view {
@@ -377,14 +542,16 @@ contract CareEdgesTest is GameTest {
             assertEq(nft.hamster(id).stamina, stamina + gain, "the stored gain is credited exactly");
             stamina += gain;
         }
-        assertEq(previousGain, 2);
+        assertEq(previousGain, 3, "from 910 up the chained tier floor gives high food 1 + 2");
     }
 
     function test_trainingAtFullStaminaWidthKeepsGrowingUntilArithmeticStops() public {
         HamsterHarness harness = _harness();
         uint256 id = _mintFed(alice, 2);
-        harness.setStaminaForTest(id, type(uint256).max - 2);
-        _train(alice, id); // gain 2 lands exactly on the maximum
+        harness.setStaminaForTest(id, type(uint256).max - 3);
+        // Base 1: raw gains 1, 1, 2 chain to 1, 2, 3, so high food gains 3 and lands on the maximum.
+        assertEq(nft.previewTrainingGain(id), 3);
+        _train(alice, id);
         assertEq(nft.hamster(id).stamina, type(uint256).max);
         vm.prank(alice);
         nft.startTraining(id);
@@ -429,6 +596,7 @@ contract CareEdgesTest is GameTest {
         nft.cancelTraining(a);
 
         _enqueue(bob, b);
+        _waitQueueWindow();
         queue.requestRound(0);
         vm.expectRevert(HamsterRunNFT.NoTraining.selector);
         nft.settleTraining(a);

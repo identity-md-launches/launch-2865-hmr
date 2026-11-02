@@ -210,12 +210,19 @@ contract WorldHandler is Test {
         HamsterRunNFT.Hamster memory ham = nft.hamster(id);
         assertEq(ham.stamina, ghostStamina[id]);
         assertEq(uint256(ham.activity), uint256(Activity.Idle));
-        uint256 credit = 2 + 2 * uint256(tier) + (gain > 10 ? 10 : gain);
-        assertEq(ham.bodyScore, body + credit > 100 ? 100 : body + credit, "training body credit");
+        assertEq(ham.bodyScore, _trainedBody(body, gain, tier), "training body credit");
         (uint256 readyAt, uint256 storedGain,) = nft.training(id);
         assertEq(readyAt, 0);
         assertEq(storedGain, 0);
         _mustRevert(caller, address(nft), 0, abi.encodeCall(nft.settleTraining, (id)), "settled twice");
+    }
+
+    /// @dev DESIGN: cap = 60 on low food, else 100; a score already at or above the cap is left alone.
+    function _trainedBody(uint256 body, uint256 gain, uint8 tier) private pure returns (uint256) {
+        uint256 credit = 2 + 2 * uint256(tier) + (gain > 10 ? 10 : gain);
+        uint256 ceiling = tier == 0 ? 60 : 100;
+        if (body >= ceiling) return body;
+        return body + credit > ceiling ? ceiling : body + credit;
     }
 
     function cancelTraining(uint256 petSeed, uint256 change) external {
@@ -281,12 +288,13 @@ contract WorldHandler is Test {
         for (uint256 id = 1; id <= ghostMinted; ++id) {
             if (_mayEnter(id) && nft.hamster(id).stamina / 25 == band) _enter(id);
         }
-        uint256 live = _liveCount(band);
-        if (live < 2) return;
+        vm.roll(_block() + 10); // the anti-steering wait before any entry can be locked
+        uint256 eligible = _eligibleCount(band);
+        if (eligible < 2) return;
         address caller = _anyone(callerSeed);
         vm.prank(caller);
         uint256 round = queue.requestRound(band);
-        _afterRequest(round, band, live - live % 2);
+        _afterRequest(round, band, eligible);
         hits["rallyOk"]++;
     }
 
@@ -338,18 +346,29 @@ contract WorldHandler is Test {
 
     function requestRound(uint256 bandSeed, uint256 callerSeed) external {
         uint256 band = bands[bandSeed % bands.length];
-        uint256 live = _liveCount(band);
+        uint256 live = _eligibleCount(band);
         for (uint256 i; i < bands.length && live < 2; ++i) {
             band = bands[(bandSeed % bands.length + i) % bands.length];
-            live = _liveCount(band);
+            live = _eligibleCount(band);
+        }
+        if (live < 2 && callerSeed % 2 == 0) {
+            // Wait out the anti-steering window, as a keeper watching eligibleCount would.
+            vm.roll(_block() + 10);
+            band = bands[bandSeed % bands.length];
+            live = _eligibleCount(band);
+            for (uint256 i; i < bands.length && live < 2; ++i) {
+                band = bands[(bandSeed % bands.length + i) % bands.length];
+                live = _eligibleCount(band);
+            }
         }
         address caller = _anyone(callerSeed);
+        assertEq(queue.eligibleCount(band), live, "eligibleCount view agrees with the restated rule");
         if (live < 2) {
             _mustRevert(caller, address(queue), 0, abi.encodeCall(queue.requestRound, (band)), "too few");
             hits["requestRefused"]++;
             return;
         }
-        uint256 expected = live - live % 2;
+        uint256 expected = live;
         vm.prank(caller);
         uint256 round = queue.requestRound(band);
         _afterRequest(round, band, expected);
@@ -358,7 +377,8 @@ contract WorldHandler is Test {
 
     function _afterRequest(uint256 round, uint256 band, uint256 expected) private {
         MatchQueue.Snapshot[] memory racers = queue.roundRacers(round);
-        assertEq(racers.length, expected, "largest even live prefix");
+        assertEq(racers.length, expected, "every live pet past its wait window, odd counts included");
+        _assertNoEligibleLeftBehind(band);
         (uint256 storedBand, uint256 target, uint256 week, MatchQueue.RoundStatus status,,) =
             queue.roundInfo(round);
         assertEq(storedBand, band);
@@ -413,6 +433,7 @@ contract WorldHandler is Test {
         assertEq(ids.length, racers.length / 2);
         uint256 rosterSum;
         uint256 pairedSum;
+        pairedSum = _checkBye(round, racers);
         // Multiset equality through a wrapping sum of hashes: order free, and a duplicate does not cancel.
         for (uint256 i; i < racers.length; ++i) {
             unchecked {
@@ -433,6 +454,39 @@ contract WorldHandler is Test {
             ghostRaceHash[ids[i]] = _raceHash(race);
         }
         assertEq(pairedSum, rosterSum, "every locked racer runs once, with its snapshot unchanged");
+    }
+
+    function _assertNoEligibleLeftBehind(uint256 band) private view {
+        MatchQueue.Entry[] memory left = queue.queueEntries(band);
+        for (uint256 i; i < left.length; ++i) {
+            assertGt(left[i].joinedBlock + 10, _block(), "no eligible live pet is left behind");
+        }
+    }
+
+    /// @return byeHash the bye's snapshot hash, or 0 for an even round
+    function _checkBye(uint256 round, MatchQueue.Snapshot[] memory racers) private returns (uint256 byeHash) {
+        uint256 bye = queue.roundBye(round);
+        if (racers.length % 2 == 0) {
+            assertEq(bye, 0, "an even round has no bye");
+            return 0;
+        }
+        (,, uint256 week,,,) = queue.roundInfo(round);
+        uint256 found;
+        for (uint256 i; i < racers.length; ++i) {
+            if (racers[i].tokenId != bye) continue;
+            ++found;
+            byeHash = uint256(keccak256(abi.encode(racers[i])));
+            assertEq(queue.activeToken(racers[i].player), 0, "the bye's wallet is freed");
+        }
+        assertEq(found, 1, "the bye is exactly one locked racer");
+        assertEq(uint256(nft.hamster(bye).activity), uint256(Activity.Idle), "the bye is released");
+        ghostInOpenRace[bye] = false;
+        // The attempt is handed back in the quota week it was taken from.
+        ghostWeeklyLocks[bye][week]--;
+        if (_now() / 1 weeks == week) {
+            assertEq(nft.matchesThisWeek(bye), ghostWeeklyLocks[bye][week], "bye attempt refunded");
+        }
+        hits["byeOk"]++;
     }
 
     function _assertOutcomeIsConsistent(MatchQueue.Race memory race) private pure {
@@ -598,6 +652,7 @@ contract WorldHandler is Test {
         _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.lockQueue, (id, stranger)), "lockQueue");
         _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.lockMatch, (id)), "lockMatch");
         _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.unlockQueue, (id)), "unlockQueue");
+        _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.releaseBye, (id)), "releaseBye");
         _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.expireMatchLock, (id)), "expireMatchLock");
         _mustRevert(stranger, nftAddress, 0, abi.encodeCall(nft.rewardMatch, (id, true)), "rewardMatch");
         hits["strangerRefused"]++;
@@ -668,6 +723,17 @@ contract WorldHandler is Test {
         MatchQueue.Entry[] memory entries = queue.queueEntries(band);
         for (uint256 i; i < entries.length; ++i) {
             if (!nft.isHungry(entries[i].tokenId) && _now() <= entries[i].joinedAt + 1 days) ++live;
+        }
+    }
+
+    /// @dev Restates DESIGN's rule: live (fed, within TTL) and at least 10 blocks since joining.
+    function _eligibleCount(uint256 band) private view returns (uint256 eligible) {
+        MatchQueue.Entry[] memory entries = queue.queueEntries(band);
+        for (uint256 i; i < entries.length; ++i) {
+            if (
+                !nft.isHungry(entries[i].tokenId) && _now() <= entries[i].joinedAt + 1 days
+                    && _block() >= entries[i].joinedBlock + 10
+            ) ++eligible;
         }
     }
 
@@ -897,8 +963,8 @@ contract StatefulInvariantsTest is GameTest {
         for (uint256 round = 1; round <= rounds; ++round) {
             (,,, MatchQueue.RoundStatus status, bytes32 seed, uint256 count) = queue.roundInfo(round);
             assertEq(uint8(status), world.ghostRoundStatus(round), "only legal transitions");
-            assertEq(count % 2, 0);
             assertGe(count, 2);
+            _assertByeRecord(round, status == MatchQueue.RoundStatus.Fulfilled && count % 2 == 1);
             assertLe(count, 32);
             uint256 raceCount = queue.roundMatchIds(round).length;
             if (status == MatchQueue.RoundStatus.Fulfilled) {
@@ -916,6 +982,11 @@ contract StatefulInvariantsTest is GameTest {
             );
             assertEq(queue.matchInfo(matchId).settled, world.ghostRaceSettled(matchId));
         }
+    }
+
+    function _assertByeRecord(uint256 round, bool expectBye) private view {
+        if (expectBye) assertTrue(queue.roundBye(round) != 0, "a fulfilled odd round names its bye");
+        else assertEq(queue.roundBye(round), 0, "only a fulfilled odd round has a bye");
     }
 
     // ------------------------------------------------------------------ liveness
@@ -962,7 +1033,7 @@ contract StatefulInvariantsTest is GameTest {
     /// @dev A seeded walk through the same handler, in the same proportions as the campaign. It proves that
     ///      each branch the invariants lean on is reached, so they are not passing over an empty game.
     function test_seededWalkReachesEveryOutcomeAndKeepsEveryInvariant() public {
-        string[24] memory labels = [
+        string[25] memory labels = [
             "feedOk",
             "feedLocked",
             "feedRefused",
@@ -986,7 +1057,8 @@ contract StatefulInvariantsTest is GameTest {
             "withdrawOk",
             "forceOk",
             "configOk",
-            "strangerRefused"
+            "strangerRefused",
+            "byeOk"
         ];
         bytes4[20] memory selectors = [
             world.feed.selector,

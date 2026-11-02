@@ -1,0 +1,18 @@
+{
+  "kind": "evm_contracts",
+  "contracts": [
+    {
+      "contract": "HamsterRunNFT",
+      "constructorArgs": [
+        "$owner"
+      ]
+    },
+    {
+      "contract": "MatchQueue",
+      "constructorArgs": [
+        "$contract:HamsterRunNFT"
+      ]
+    }
+  ],
+  "notes": "HamsterRun v2 testnet game on Sepolia: two application contracts, no token, pool or reward distributor. HamsterRunNFT(address initialOwner) is the ERC-721 'HamsterRun' (HAM) with max supply 9999, one free mint per wallet while mintOpen, ownerMint, starting stamina 10 with no stamina ceiling (checked math), three weight classes Fit/Normal/Obese driven by an on-chain body score, fedUntil = feed time + 72 hours, three ETH food tiers (constructor defaults 0.0001 / 0.0002 / 0.0003 ETH with training multipliers 10000 / 15000 / 20000 bps, owner-configurable via setFoodConfig), timed on-chain training with the food bonus, hungry lockout for training and queue entry, and owner withdrawal of food fees. Its owner argument is $owner (Ownable2Step; the factory is only msg.sender and holds no role). MatchQueue(address nftAddress) is constructed with $contract:HamsterRunNFT: stamina-band queues, permissionless requestRound / fulfillRound / settleMatch pairing with future-blockhash randomness (fulfil within 256 blocks or expireRound), weight class as a race modifier, stamina and address-bound non-transferable points, and a weekly match quota per NFT. MatchQueue has no owner; it embeds the abstract PointsLedger. GameMath is an internal library and is not deployed. MatchQueue's constructor only stores the address and makes no external call, so the constructors run on an empty chain. After launch the owner must call HamsterRunNFT.setMatchQueue(queue) once with the confirmed MatchQueue address (the NFT checks the queue's nft() binding), optionally adjust setFoodConfig, and call setMintOpen(true); queue entry reverts with QueueNotConfigured until the binding is made. Deployment sends no ETH and performs no initialization calls."
+}

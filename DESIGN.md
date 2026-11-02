@@ -58,22 +58,27 @@ Base unit `--u: 4px`; gaps are 4/8/12/16/20/24px. Corners are square on the scre
 - **Meter** (`components/Meter.tsx`, `.meter`, `.bar`, `.seg`): RPG status bar of ten 14px segments with label and text value, `role="meter"`. Used for stamina (progress within the 25-wide band, value uncapped), weight (body score 0-100, tone by class), food (time left of 72h), training (progress of 6h), races this week (of 5) and queue wait (of 10 blocks).
 - **Hamster sprite** (`components/Hamster.tsx`): 18-column character-grid SVG; Fit narrows the belly, Obese adds two belly rows. Hops in two steps unless reduced motion is requested.
 - **Pet chips** (`.chip`, `role="radio"`): pick an owned HAM.
-- **Round card** (`.round`, `.match`): status, fulfil/expire/settle actions, scores with winner in mint.
-- **Invite form and board** (`.input-row`, `.board`): handle input with inline error, read-only link, copy/post actions, ranked table.
+- **Race band inspector** (`App.tsx` `RaceScreen`, `.input-row`): visitors without a selected HAM can enter a stamina band and inspect queue depth, entries and eligibility. Request round is available to any connected Sepolia wallet when ready; Enqueue and Leave remain attached to an owned HAM. The labelled numeric input validates on submit, and `#band-msg` wraps long band numbers without clipping.
+- **Round card** (`.round`, `.match`): status, fulfil/expire/settle actions, scores with winner in mint. Show more rounds expands the first three to six; Load older rounds adds six more to the retained list on each activation, down to round 1. Every loaded round keeps its existing fulfilment, expiry and settlement controls.
+- **Ownership status** (`App.tsx` ownership banner and mint stats): an incomplete read says "Read error" and explains the retry. The Care HUD empty-mint prompt appears only after a successful ownership read. A failed refresh retains the last complete data and labels it accordingly.
+- **Invite form and board** (`.input-row`, `.board`): handle input with inline error, read-only link, copy/post actions, ranked table. The four-column board uses `width: 100%`, `table-layout: fixed` and `overflow-wrap: anywhere` on headers and cells; handles and displayed wallet values wrap rather than clip.
 - **Log line** (`.log`, `aria-live="polite"`): the console's message line for every transaction step, with an explorer link.
-- **Wallet sheet** (`.sheet-bg`, `.sheet`, `.row`, `.x`): 420px dialog with 48px rows, bottom sheet under 640px, closes by backdrop, Escape and ×, focus returns to Connect.
+- **Wallet sheet** (`.sheet-bg`, `.sheet`, `.row`, `.x`): 420px dialog with 48px rows, bottom sheet under 640px, closes by backdrop, Escape and ×. It is portalled outside `#root`, which becomes inert while open. Focus starts at Close; Tab and Shift+Tab cycle through enabled, visible sheet controls; closing restores background interaction and focus to Connect.
 
 ### Responsive behavior
 
 - Above 640px: centered 1040px console with 24px outer margin; meters flow in `auto-fit` columns of at least 240px; feed buttons in columns of at least 220px.
 - 640px and below: the console goes full-bleed like a portrait Game Boy (no outer margin, 40px bottom-right curve), the screen inset shrinks to 6px, h1 drops to 24px, the sprite to 64px, tabs tighten so all four fit one row at 390px, the Mint button stretches full width, the D-pad and pills center under the screen, and the wallet sheet docks to the bottom.
 - 360px and below: stat grid becomes two columns and the sound toggle hides (it stays in the header at larger widths).
+- The populated invite board retains all four columns at 320px and 390px; headings, handles and displayed wallet values wrap within the screen.
 - Every tap target is at least 44px (D-pad 48px, sheet rows 48px, A buttons 48-56px).
 - `prefers-reduced-motion: reduce` stops the sprite hop; the only other motion is a 60ms button press.
 
 ### Accessibility notes
 
 Skip link to the screen, `<header>`/`<main>`/`<footer>`/`<nav>` landmarks, one h1 per screen, labelled inputs with `aria-invalid` and a described-by message, `aria-current` tabs, `aria-pressed` sound toggle, a polite live region for transaction progress, and a modal dialog for the wallet sheet.
+
+The revision preserves the existing palette, typography, spacing and console chrome. Its Better Interface review and browser limitations are recorded in [docs/SITE-VALIDATION.md](docs/SITE-VALIDATION.md).
 
 ## Part 2. Contract design (HamsterRun v2 deterministic design)
 

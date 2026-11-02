@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useAccount, useConnect, useDisconnect, useSwitchChain, type Connector } from "wagmi";
 import { ADD_CHAIN_PARAMS, CHAIN_ID } from "../config";
 import { short } from "../game";
@@ -31,14 +32,35 @@ export function ConnectSheet() {
   const [note, setNote] = useState("");
   const opener = useRef<HTMLButtonElement>(null);
   const closeBtn = useRef<HTMLButtonElement>(null);
+  const sheet = useRef<HTMLDivElement>(null);
   const prompted = useRef(false);
 
   useEffect(() => {
     if (!open) return;
+    // The sheet is portalled outside the app, so inert covers all background controls.
+    const root = document.getElementById("root");
+    const wasInert = root?.inert ?? false;
+    if (root) root.inert = true;
     closeBtn.current?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); setOpen(false); }
+      if (e.key !== "Tab") return;
+      const controls = [...(sheet.current?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], [tabindex='0']") ?? [])]
+        .filter((el) => el.getClientRects().length > 0);
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (!sheet.current?.contains(document.activeElement) || (!e.shiftKey && document.activeElement === last)) {
+        e.preventDefault(); first?.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last?.focus();
+      }
+    };
     addEventListener("keydown", onKey);
-    return () => { removeEventListener("keydown", onKey); opener.current?.focus(); };
+    return () => {
+      removeEventListener("keydown", onKey);
+      if (root) root.inert = wasInert;
+      opener.current?.focus();
+    };
   }, [open]);
   useEffect(() => { if (isConnected) setOpen(false); }, [isConnected]);
   useEffect(() => { if (error) setNote(/reject|denied/i.test(error.message) ? "Request declined in the wallet." : "That wallet did not connect. Try again."); }, [error]);
@@ -76,9 +98,9 @@ export function ConnectSheet() {
       <button ref={opener} className="btn-a" onClick={() => { reset(); setNote(""); setOpen(true); }}>
         <span className="a-dot" aria-hidden="true">A</span>Connect
       </button>
-      {open && (
+      {open && createPortal(
         <div className="sheet-bg" onClick={() => setOpen(false)}>
-          <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" onClick={(e) => e.stopPropagation()}>
+          <div ref={sheet} className="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" onClick={(e) => e.stopPropagation()}>
             <div className="sheet-head">
               <h2 id="sheet-title">Connect a wallet</h2>
               <button ref={closeBtn} className="x" aria-label="Close" onClick={() => setOpen(false)}>×</button>
@@ -97,7 +119,7 @@ export function ConnectSheet() {
             ))}
             <p className="sheet-note" role="status">{note || "Sepolia testnet only. HamsterRun never asks for a seed phrase."}</p>
           </div>
-        </div>
+        </div>, document.body,
       )}
     </>
   );

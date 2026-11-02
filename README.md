@@ -33,7 +33,17 @@ Commit `dist/` after every rebuild; the publisher serves the committed export an
 
 ### Last check results
 
-Typecheck pass, build pass, 10/10 unit tests, 34/34 Playwright interaction assertions at 390 and 1440 wide, design probe 15/16 (the remaining `chrome` flag is the console bezel the brief requires). Transactions were not signed in testing; see the validation record for details and limitations.
+Revision: typecheck pass, production build pass, 10/10 unit tests, 10/10 Chromium regression scenarios, and navigation/form checks across all four screens at 320/390/640/1440px. Design probe: 15/16 (the remaining `chrome` flag is the console bezel the brief requires). All six reviewer findings reproduced and were fixed. Transactions used ABI-encoded fixtures and a rejecting test wallet, with no signing or broadcast. WebKit did not complete page creation and remains unverified; see the [validation record](docs/SITE-VALIDATION.md).
+
+The targeted export regression runner is `web/tests/browser-regressions.mjs`. After `npm ci` in `web/` and a production build, install Playwright outside the repository and run from the repository root:
+
+```bash
+npm install --prefix /tmp/hamster-browser-tools playwright@1.56.1
+/tmp/hamster-browser-tools/node_modules/.bin/playwright install chromium
+IMD_PLAYWRIGHT=/tmp/hamster-browser-tools/node_modules/playwright/index.mjs node web/tests/browser-regressions.mjs
+```
+
+The browser needs its normal OS libraries and fonts. The runner serves `dist/` at a local `/preview/` subpath, intercepts every configured Sepolia RPC, rejects test wallet sends locally, and writes results/screenshots only under `test/scratch/`. `--baseline` records the original failures without treating them as passes; `--webkit` selects WebKit when available. The worker installed build dependencies in an isolated temporary copy using the unchanged package manifest/lockfile, then copied the completed export back to `dist/`.
 
 ## Applications
 

@@ -54,11 +54,17 @@ export async function readOwned(owner: Address, totalSupply: bigint): Promise<bi
     const logs = await publicClient.getLogs({ address: NFT_ADDRESS, event: transferEvent, args: { to: owner }, fromBlock: DEPLOY_BLOCK, toBlock: "latest" });
     candidates = [...new Set(logs.map((l) => l.args.tokenId as bigint))];
   } catch {
-    const n = Number(totalSupply > 600n ? 600n : totalSupply);
-    candidates = Array.from({ length: n }, (_, i) => BigInt(i + 1));
+    // IDs are sequential, with no burns. A log-range limit must not hide later mints.
+    candidates = Array.from({ length: Number(totalSupply) }, (_, i) => BigInt(i + 1));
   }
-  const owners = await Promise.all(candidates.map((id) => nft("ownerOf", [id]).catch(() => zeroAddress)));
-  return candidates.filter((_, i) => (owners[i] as string).toLowerCase() === owner.toLowerCase()).sort((a, b) => Number(a - b));
+  const owned: bigint[] = [];
+  for (let start = 0; start < candidates.length; start += 40) {
+    const batch = candidates.slice(start, start + 40);
+    // Propagate failed reads: a partial scan is not an authoritative empty balance.
+    const owners = await Promise.all(batch.map((id) => nft("ownerOf", [id])));
+    owned.push(...batch.filter((_, i) => (owners[i] as string).toLowerCase() === owner.toLowerCase()));
+  }
+  return owned.sort((a, b) => Number(a - b));
 }
 
 export async function readPet(id: bigint): Promise<PetView> {
@@ -83,8 +89,9 @@ export async function readRounds(roundCount: bigint, howMany = 6): Promise<Round
       const r = info as readonly [bigint, bigint, bigint, number, `0x${string}`, bigint];
       const matches = await Promise.all(
         (matchIds as bigint[]).map(async (mid) => {
-          const m = (await q("matchInfo", [mid])) as readonly [bigint, Racer, Racer, bigint, bigint, bigint, boolean];
-          return { id: mid, a: m[1], b: m[2], scoreA: m[3], scoreB: m[4], winner: m[5], settled: m[6] };
+          // matchInfo has one named Race tuple output; viem decodes it as an object.
+          const m = (await q("matchInfo", [mid])) as Omit<MatchView, "id"> & { roundId: bigint };
+          return { id: mid, a: m.a, b: m.b, scoreA: m.scoreA, scoreB: m.scoreB, winner: m.winner, settled: m.settled };
         }),
       );
       return { id, band: r[0], entropyBlock: r[1], status: Number(r[3]), count: r[5], bye: bye as bigint, matches };

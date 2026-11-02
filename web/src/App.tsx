@@ -50,6 +50,8 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState<Log>({ kind: "info", text: "Insert wallet to start. Reading Sepolia…" });
   const [selected, setSelected] = useState<bigint | null>(null);
+  const [publicBand, setPublicBand] = useState(0n);
+  const [roundLimit, setRoundLimit] = useState(6);
 
   useEffect(() => {
     const on = () => setScreen(screenFromHash());
@@ -76,9 +78,9 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokens.join(",")]);
   const pet = usePoll(selected !== null ? () => readPet(selected) : null, [selected], 10000);
-  const band = pet.data ? bandOf(pet.data.ham.stamina) : null;
-  const bandState = usePoll(band !== null ? () => readBand(band) : null, [band?.toString()], 12000);
-  const rounds = usePoll(g ? () => readRounds(g.roundCount) : null, [g?.roundCount.toString()], 15000);
+  const band = pet.data ? bandOf(pet.data.ham.stamina) : publicBand;
+  const bandState = usePoll(() => readBand(band), [band.toString()], 12000);
+  const rounds = usePoll(g ? () => readRounds(g.roundCount, roundLimit) : null, [g?.roundCount.toString(), roundLimit], 15000);
 
   useEffect(() => {
     if (g && log.text.startsWith("Insert wallet")) setLog({ kind: "info", text: "Sepolia connected. Press A to begin." });
@@ -158,18 +160,21 @@ export function App() {
           </nav>
 
           <StatusBanner g={g} error={global.error} />
+          {address && owned.error && <p className="banner banner-warn" role="status">Could not read all owned HAM. Retrying every 30 seconds.{owned.data ? " Showing the last complete ownership read." : " Care controls will appear after a complete read."}</p>}
 
           {screen === "play" && (
             <PlayScreen
               g={g} now={now} address={address} isConnected={isConnected} onSepolia={onSepolia} txReady={txReady} busy={busy}
-              tokens={tokens} ownedLoading={!!address && owned.data === null} selected={selected} setSelected={setSelected}
+              tokens={tokens} ownedLoading={!!address && owned.data === null && !owned.error} ownedError={owned.error} selected={selected} setSelected={setSelected}
               freeMinted={player.data?.freeMinted ?? false} pet={pet.data} send={send} go={go}
             />
           )}
           {screen === "race" && (
             <RaceScreen
               g={g} now={now} address={address} txReady={txReady} busy={busy} pet={pet.data} band={band}
-              bandState={bandState.data} rounds={rounds.data} roundsError={rounds.error} send={send} points={player.data?.points} go={go}
+              setBand={setPublicBand} bandState={bandState.data} bandError={bandState.error}
+              rounds={rounds.data} roundsError={rounds.error} loadOlder={() => setRoundLimit((n) => n + 6)}
+              send={send} points={player.data?.points} go={go}
             />
           )}
           {screen === "invite" && <InviteScreen address={address} ref_={ref} />}
@@ -230,7 +235,7 @@ function useGlobalType() { return null as Awaited<ReturnType<typeof readGlobal>>
 
 function PlayScreen(p: {
   g: Awaited<ReturnType<typeof readGlobal>> | null; now: number; address?: Address; isConnected: boolean; onSepolia: boolean; txReady: boolean;
-  busy: string | null; tokens: bigint[]; ownedLoading: boolean; selected: bigint | null; setSelected: (id: bigint) => void; freeMinted: boolean;
+  busy: string | null; tokens: bigint[]; ownedLoading: boolean; ownedError: boolean; selected: bigint | null; setSelected: (id: bigint) => void; freeMinted: boolean;
   pet: Awaited<ReturnType<typeof readPet>> | null; send: Send; go: (s: ScreenId) => void;
 }) {
   const { g, pet } = p;
@@ -256,7 +261,7 @@ function PlayScreen(p: {
         <div className="mint-stats">
           <div><span className="k">Minted</span><span className="v">{g ? `${g.totalSupply} / ${MAX_SUPPLY}` : "…"}</span></div>
           <div><span className="k">Mint</span><span className={`v ${g?.mintOpen ? "t-mint" : "t-amber"}`}>{g ? (g.mintOpen ? "Open" : "Closed") : "…"}</span></div>
-          <div><span className="k">Your HAM</span><span className="v">{p.address ? (p.ownedLoading ? "…" : p.tokens.length) : "-"}</span></div>
+          <div><span className="k">Your HAM</span><span className="v">{p.address ? (p.ownedError ? "Read error" : p.ownedLoading ? "…" : p.tokens.length) : "-"}</span></div>
         </div>
         <button className="btn-a btn-big" disabled={!canMint || p.busy === "mint"} onClick={() => p.send("mint", "Mint", "nft", "mint", [])}>
           <span className="a-dot" aria-hidden="true">A</span>{p.busy === "mint" ? "Minting…" : "Mint free HAM"}
@@ -278,7 +283,7 @@ function PlayScreen(p: {
       )}
 
       {pet ? <CareHud {...p} pet={pet} /> : (
-        p.address && !p.ownedLoading && p.tokens.length === 0 && (
+        p.address && !p.ownedLoading && !p.ownedError && p.tokens.length === 0 && (
           <div className="panel"><h2>Care HUD</h2><p className="note">Mint a HAM and its status bars appear here: stamina, weight, food timer, training and weekly races.</p></div>
         )
       )}
@@ -382,8 +387,9 @@ function CareHud(p: Parameters<typeof PlayScreen>[0] & { pet: NonNullable<Parame
 
 function RaceScreen(p: {
   g: Awaited<ReturnType<typeof readGlobal>> | null; now: number; address?: Address; txReady: boolean; busy: string | null;
-  pet: Awaited<ReturnType<typeof readPet>> | null; band: bigint | null; bandState: Awaited<ReturnType<typeof readBand>> | null;
-  rounds: RoundView[] | null; roundsError: boolean; send: Send; points?: bigint; go: (s: ScreenId) => void;
+  pet: Awaited<ReturnType<typeof readPet>> | null; band: bigint; setBand: (band: bigint) => void;
+  bandState: Awaited<ReturnType<typeof readBand>> | null; bandError: boolean;
+  rounds: RoundView[] | null; roundsError: boolean; loadOlder: () => void; send: Send; points?: bigint; go: (s: ScreenId) => void;
 }) {
   const { g, pet, bandState } = p;
   const block = g?.block ?? 0n;
@@ -395,6 +401,8 @@ function RaceScreen(p: {
   const quotaLeft = pet ? Number(pet.usedThisWeek) < WEEKLY_MATCH_LIMIT : false;
   const canEnqueue = !!g?.queueBound && !!pet && idle && !hungry && quotaLeft;
   const eligible = Number(bandState?.eligible ?? 0n);
+  const [bandDraft, setBandDraft] = useState(() => p.band.toString());
+  const [bandError, setBandError] = useState("");
   const [roundsOpen, setRoundsOpen] = useState(false);
   const shown = useMemo(() => (roundsOpen ? p.rounds : p.rounds?.slice(0, 3)) ?? [], [p.rounds, roundsOpen]);
 
@@ -405,16 +413,35 @@ function RaceScreen(p: {
       {!g?.queueBound && g && <p className="banner banner-warn">The queue is not bound to the NFT yet, so nobody can enqueue. Rounds below are read-only.</p>}
 
       {!pet ? (
-        <div className="panel"><p className="note">{p.address ? "Mint or pick a HAM on the Play screen first." : "Connect a wallet and pick a HAM on the Play screen."}</p>
+        <div className="panel"><p className="note">You can inspect any band and request a ready round without owning a HAM. To enqueue, mint or pick a HAM on the Play screen.</p>
           <button className="btn-soft" onClick={() => p.go("play")}>Go to Play</button></div>
-      ) : (
+      ) : null}
         <div className="panel">
+          {!pet && (
+            <form className="stack" noValidate onSubmit={(e) => {
+              e.preventDefault();
+              if (!/^\d{1,78}$/.test(bandDraft) || BigInt(bandDraft) >= 2n ** 256n) {
+                setBandError("Enter a whole band number of 0 or greater, up to 78 digits."); return;
+              }
+              setBandError(""); p.setBand(BigInt(bandDraft));
+            }}>
+              <label htmlFor="band">Stamina band</label>
+              <div className="input-row">
+                <input id="band" name="band" inputMode="numeric" value={bandDraft} onChange={(e) => setBandDraft(e.target.value)}
+                  aria-invalid={!!bandError} aria-describedby="band-msg" />
+                <button className="btn-soft" type="submit">Inspect band</button>
+              </div>
+              <p id="band-msg" className={bandError ? "note t-magenta" : "note"}>{bandError || `Viewing band ${p.band} (stamina ${bandRange(p.band)}). Entries wait ${QUEUE_WAIT_BLOCKS} blocks.`}</p>
+            </form>
+          )}
+          {pet && (
           <div className="hud-head">
-            <h2>HAM #{pet.id.toString()} · band {p.band?.toString()}</h2>
+            <h2>HAM #{pet.id.toString()} · band {p.band.toString()}</h2>
             <span className="tag">{ACTIVITIES[pet.ham.activity]}</span>
           </div>
+          )}
           <div className="mint-stats">
-            <div><span className="k">Stamina</span><span className="v">{pet.ham.stamina.toString()}</span></div>
+            {pet && <div><span className="k">Stamina</span><span className="v">{pet.ham.stamina.toString()}</span></div>}
             <div><span className="k">Queue depth</span><span className="v">{bandState ? `${entries.length} / 32` : "…"}</span></div>
             <div><span className="k">Eligible now</span><span className="v">{bandState ? eligible : "…"}</span></div>
           </div>
@@ -423,25 +450,27 @@ function RaceScreen(p: {
               hint={`Entries wait ${QUEUE_WAIT_BLOCKS} blocks (about 2 minutes) before a round can include them.`} />
           )}
           <div className="row-actions">
-            {!mine && (
+            {pet && !mine && (
               <button className="btn-a" disabled={!p.txReady || !canEnqueue || p.busy === "enqueue"} onClick={() => p.send("enqueue", "Enqueue", "queue", "enqueue", [pet.id])}>
-                <span className="a-dot" aria-hidden="true">A</span>Enqueue in band {p.band?.toString()}
+                <span className="a-dot" aria-hidden="true">A</span>Enqueue in band {p.band.toString()}
               </button>
             )}
-            {mine && (
+            {pet && mine && (
               <button className="btn-b" disabled={!p.txReady || p.busy === "leave"} onClick={() => p.send("leave", "Leave queue", "queue", "leaveQueue", [pet.id])}>
                 <span className="b-dot" aria-hidden="true">B</span>Leave queue
               </button>
             )}
-            <button className="btn-a" disabled={!p.txReady || eligible < 2 || !g?.queueBound || p.busy === "request"}
+            <button className="btn-a" disabled={!p.txReady || !bandState || bandState.band !== p.band || p.bandError || eligible < 2 || !g?.queueBound || p.busy === "request"}
               onClick={() => p.send("request", "Request round", "queue", "requestRound", [p.band])}>
               <span className="a-dot" aria-hidden="true">A</span>Request round
             </button>
           </div>
           <p className="note">
-            {!mine && !idle ? `This HAM is ${ACTIVITIES[pet.ham.activity].toLowerCase()} and cannot join now.`
-              : !mine && hungry ? "Hungry: feed first. The queue is locked."
-              : !mine && !quotaLeft ? "Weekly races used up. The quota resets each epoch week (Thursday 00:00 UTC)."
+            {p.bandError ? "Could not read this band. Retrying."
+              : !bandState ? "Reading this band…"
+              : pet && !mine && !idle ? `This HAM is ${ACTIVITIES[pet.ham.activity].toLowerCase()} and cannot join now.`
+              : pet && !mine && hungry ? "Hungry: feed first. The queue is locked."
+              : pet && !mine && !quotaLeft ? "Weekly races used up. The quota resets each epoch week (Thursday 00:00 UTC)."
               : eligible < 2 ? "A round needs two eligible pets in this band." : "Two or more pets are eligible. Anyone can request the round."}
           </p>
           {entries.length > 0 && (
@@ -459,16 +488,18 @@ function RaceScreen(p: {
             </ul>
           )}
         </div>
-      )}
 
       <div className="panel">
         <h2>Recent rounds</h2>
         {!p.rounds && !p.roundsError && <p className="note">Reading rounds…</p>}
-        {p.roundsError && !p.rounds && <p className="note">Could not read rounds. Retrying.</p>}
+        {p.roundsError && <p className="note">Could not read rounds. Retrying.{p.rounds ? " Showing the last complete read." : ""}</p>}
         {p.rounds && p.rounds.length === 0 && <p className="note">No rounds yet. The first one starts when two pets in a band are eligible.</p>}
         {shown.map((r) => <RoundCard key={r.id.toString()} r={r} block={block} {...p} />)}
         {(p.rounds?.length ?? 0) > 3 && (
           <button className="btn-soft" aria-expanded={roundsOpen} onClick={() => setRoundsOpen(!roundsOpen)}>{roundsOpen ? "Show fewer rounds" : "Show more rounds"}</button>
+        )}
+        {roundsOpen && p.rounds && g && BigInt(p.rounds.length) < g.roundCount && (
+          <button className="btn-soft" onClick={p.loadOlder}>Load older rounds</button>
         )}
         {p.points !== undefined && <p className="note">Your wallet points: {p.points.toString()} (win +10, loss +2, not transferable).</p>}
       </div>

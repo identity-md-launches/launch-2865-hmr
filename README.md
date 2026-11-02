@@ -4,6 +4,37 @@ Independent Sepolia game contracts: mint a HAM, feed it, train it, and enter a r
 
 **Deployment status: prepared for the IdentityMD network deployer; not yet deployed by this worker.** [deployments/sepolia.json](deployments/sepolia.json) deliberately contains no invented contract addresses. The network publishes the confirmed addresses after acceptance. This repository contains the applications, vendored dependencies, tests, ABIs, deployment rehearsals, and a read-only address recorder.
 
+## Public site (web/ → dist/)
+
+An 8-bit handheld-console site for the deployed v2 contracts on Sepolia: connect a wallet, mint one free HAM when mint is open, feed (three exact-price tiers), train 6 hours and settle, join the stamina-band queue and push rounds through request → fulfil → settle, and share an off-chain X-handle invite link with a leaderboard. It reads `mintOpen()` and `matchQueue()` live and shows a "not open yet" banner until the owner runs `setMatchQueue` and `setMintOpen(true)`. Design tokens and components are in [DESIGN.md](DESIGN.md) Part 1; the check record is [docs/SITE-VALIDATION.md](docs/SITE-VALIDATION.md).
+
+- Stack: Vite + React + TypeScript, wagmi/viem (EIP-6963 browser wallets such as MetaMask, Rabby and Frame, "Open in" links for phones, Coinbase Smart Wallet). No WalletConnect relay, no project ID.
+- Addresses come from `.imd/reads/deployment.json` (`web/src/config.ts`); ABIs are imported from `abi/` and their canonical keccak matches the recorded `abiHash`.
+- Routing is hash-based (`#/play`, `#/race`, `#/invite`, `#/help`), and `vite.config.ts` uses `base: "./"`, so `dist/` works from any static host, IPFS gateway path or ENS name.
+
+### Install, preview, rebuild
+
+```bash
+cd web
+npm ci                 # install from package-lock.json
+npm run dev            # local dev server
+npm run typecheck      # tsc --noEmit
+npm test               # node --test: game formulas and invite logic
+npm run build          # typecheck + vite build into ../dist (committed)
+npm run preview        # serve the built dist/ on http://localhost:4173
+npm run og             # optional: regenerate public/og.png and favicon-32.png
+```
+
+Commit `dist/` after every rebuild; the publisher serves the committed export and does not build.
+
+### Invite service (optional)
+
+`invite-service/server.mjs` is a dependency-free Node 18+ service: `POST /attribute {handle, wallet, stage}`, `GET /leaderboard`, `GET /health`. First touch wins, and a "minted" invite counts only after `balanceOf(wallet) > 0` on HamsterRunNFT. Run it with `PORT=8787 INVITE_DB=./invites.json ALLOW_ORIGIN=https://your.site node invite-service/server.mjs`, then put its public URL in `dist/config.json` (`{"inviteApi": "https://…"}`); no rebuild is needed. With an empty URL the site says the board is offline and shows invites recorded in the visitor's browser.
+
+### Last check results
+
+Typecheck pass, build pass, 10/10 unit tests, 34/34 Playwright interaction assertions at 390 and 1440 wide, design probe 15/16 (the remaining `chrome` flag is the console bezel the brief requires). Transactions were not signed in testing; see the validation record for details and limitations.
+
 ## Applications
 
 | Contract | Responsibility | Constructor, in launch order |

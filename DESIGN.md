@@ -1,8 +1,85 @@
-# HamsterRun v2 deterministic design
+# HamsterRun v2 design
+
+This file has two parts. Part 1 documents the public site in `web/` as implemented (tokens, type, components, responsive behavior). Part 2 is the unchanged deterministic specification of the deployed v2 contracts, which the site's formulas are pinned to.
+
+## Part 1. Site design: 8-bit handheld console
+
+Source of truth: `web/src/styles.css` (tokens and components), `web/src/App.tsx` (screens), `web/src/components/` (sprite, meter), `web/src/wallet/ConnectSheet.tsx` (wallet sheet).
+
+### Concept
+
+The whole site sits inside a handheld console. A navy plastic bezel holds a black-green CRT screen; scanlines and a vignette are drawn on the screen only (`.screen::after`, `pointer-events: none`). Primary game actions are chunky A buttons (pink round "A" badge, hard drop shadow, 4px press travel). Undo-style actions (leave queue, cancel training, expire round) are B buttons (amber badge). Secondary navigation and links are thin-outline soft buttons. A working D-pad under the screen switches screens (left/right) and pets (up/down); Start and Select pills jump to Play and Help.
+
+### Color tokens
+
+Two surfaces, each with its own limited palette (`:root` in `web/src/styles.css`).
+
+| Token | Value | Role |
+| --- | --- | --- |
+| `--plastic` | `#1a1f3d` | Bezel body, wallet sheet |
+| `--plastic-hi` | `#2b3263` | Bezel highlight edge, A/B button face |
+| `--plastic-lo` | `#0d1029` | Screen inset frame, D-pad, page background |
+| `--bezel-ink` | `#c9cfff` | Text on the bezel |
+| `--btn-a` | `#ff5fa2` | A badge, power LED |
+| `--scr-bg` | `#07140f` | Screen background, meter track |
+| `--scr-panel` | `#0e261c` | Screen panels and banners |
+| `--scr-line` | `#1f4a37` | Dividers, empty meter segments, input borders |
+| `--mint` | `#8ef0c4` | Main screen text, fed/ok state, active tab |
+| `--mint-dim` | `#6cc39d` | Notes and secondary text |
+| `--amber` | `#ffc34d` | Links, warnings ("not open yet"), B badge |
+| `--magenta` | `#ff79b4` | Hungry, errors, race-quota meter |
+| `--ink-hi` | `#e9fff4` | Headings, values, focus ring |
+
+Meaning is never color-only: every meter has a text value, status tags say "Hungry"/"Fed", banners say "not open yet" in words.
+
+### Typography
+
+| Token | Size | Used for |
+| --- | --- | --- |
+| `--fs-sm` | 14px | Pixel buttons, tabs, labels, hints |
+| `--fs-body` | 16px | Body (Pixelify Sans), h2, stat values, inputs |
+| `--fs-lead` | 20px | Lead line under h1 (16px under 640px) |
+| `--fs-h` | 24px | h1 under 640px |
+| `--fs-title` | 32px | h1 on wider screens |
+
+Faces: **Press Start 2P** 400 (`--font-pixel`) for headings, buttons, tabs, labels and numbers; **Pixelify Sans** 400/600 (`--font-body`) for readable prose. Both are bundled locally from `@fontsource` (no font CDN). Letter-spacing is never changed, no text is transformed to capitals, `-webkit-font-smoothing: none` keeps glyph edges hard, sprites use `shape-rendering: crispEdges` and `image-rendering: pixelated`. Changing numbers use `tabular-nums`.
+
+### Spacing and shape
+
+Base unit `--u: 4px`; gaps are 4/8/12/16/20/24px. Corners are square on the screen (pixel look) and rounded only on the bezel plastic (20px, with the classic 64px bottom-right handheld curve, 40px on phones). Depth is hard offset shadows (`0 4px 0`), never blur.
+
+### Components
+
+- **Console** (`.console`, `.bezel-top`, `.screen-wrap`, `.screen`, `.bezel-bottom`): bezel, inset screen, D-pad (`.dpad`, 48px cells), Start/Select pills (44px high), fine-print disclaimer.
+- **A / B buttons** (`.btn-a`, `.btn-b`): min 48px high, pixel label, circular 32px badge, states rest/hover (lighter face)/pressed (moves 4px down, shadow drops)/disabled (60% opacity)/focus (2px `--ink-hi` ring, 2px offset). `.btn-big` 56px for Mint; `.btn-sm` 44px for Settle.
+- **Soft button** (`.btn-soft`): 44px outline button for secondary actions (sound toggle, Disconnect, Go to race, Show more rounds, Post on X).
+- **Tabs** (`.tabs`, `.tab`): hash links `#/play`, `#/race`, `#/invite`, `#/help`; the current one is inverted mint and carries `aria-current="page"`.
+- **Status banner** (`.banner-ok|warn|info`): live mint/queue status read from `mintOpen()` and `matchQueue()`; a 4px left rule in the state color.
+- **Meter** (`components/Meter.tsx`, `.meter`, `.bar`, `.seg`): RPG status bar of ten 14px segments with label and text value, `role="meter"`. Used for stamina (progress within the 25-wide band, value uncapped), weight (body score 0-100, tone by class), food (time left of 72h), training (progress of 6h), races this week (of 5) and queue wait (of 10 blocks).
+- **Hamster sprite** (`components/Hamster.tsx`): 18-column character-grid SVG; Fit narrows the belly, Obese adds two belly rows. Hops in two steps unless reduced motion is requested.
+- **Pet chips** (`.chip`, `role="radio"`): pick an owned HAM.
+- **Round card** (`.round`, `.match`): status, fulfil/expire/settle actions, scores with winner in mint.
+- **Invite form and board** (`.input-row`, `.board`): handle input with inline error, read-only link, copy/post actions, ranked table.
+- **Log line** (`.log`, `aria-live="polite"`): the console's message line for every transaction step, with an explorer link.
+- **Wallet sheet** (`.sheet-bg`, `.sheet`, `.row`, `.x`): 420px dialog with 48px rows, bottom sheet under 640px, closes by backdrop, Escape and ×, focus returns to Connect.
+
+### Responsive behavior
+
+- Above 640px: centered 1040px console with 24px outer margin; meters flow in `auto-fit` columns of at least 240px; feed buttons in columns of at least 220px.
+- 640px and below: the console goes full-bleed like a portrait Game Boy (no outer margin, 40px bottom-right curve), the screen inset shrinks to 6px, h1 drops to 24px, the sprite to 64px, tabs tighten so all four fit one row at 390px, the Mint button stretches full width, the D-pad and pills center under the screen, and the wallet sheet docks to the bottom.
+- 360px and below: stat grid becomes two columns and the sound toggle hides (it stays in the header at larger widths).
+- Every tap target is at least 44px (D-pad 48px, sheet rows 48px, A buttons 48-56px).
+- `prefers-reduced-motion: reduce` stops the sprite hop; the only other motion is a 60ms button press.
+
+### Accessibility notes
+
+Skip link to the screen, `<header>`/`<main>`/`<footer>`/`<nav>` landmarks, one h1 per screen, labelled inputs with `aria-invalid` and a described-by message, `aria-current` tabs, `aria-pressed` sound toggle, a polite live region for transaction progress, and a modal dialog for the wallet sheet.
+
+## Part 2. Contract design (HamsterRun v2 deterministic design)
 
 This specification describes the delivered contracts, including their deliberate testnet assumptions. Solidity 0.8.26 checked arithmetic is the default. All divisions below round down unless explicitly stated otherwise.
 
-## Deployment and ownership
+### Deployment and ownership
 
 Two non-upgradeable applications are deployed in order: `HamsterRunNFT(initialOwner)`, then `MatchQueue(nftAddress)`. Neither constructor calls another contract, creates another contract, receives ETH, nor derives ownership from its caller. NFT ownership is OpenZeppelin `Ownable2Step` with an explicit nonzero owner. MatchQueue has no owner and no configurable race parameters.
 
@@ -10,7 +87,7 @@ The NFT owner binds the queue once with `setMatchQueue`. The queue must have cod
 
 The owner controls free-mint opening, the three food prices and multipliers, owner mints within supply, fee withdrawal to itself, and a two-step ownership handover. Renouncing ownership reverts so fees and administration remain recoverable. Setting a zero pending owner only cancels a pending handover as supported by Ownable2Step.
 
-## Mint, ownership and locks
+### Mint, ownership and locks
 
 IDs are sequential from 1 to 9999 inclusive. `totalSupply` counts all lifetime mints; no burns exist. Free mint is nonpayable, requires `mintOpen`, and consumes `freeMinted[msg.sender]` before the safe receiver callback. Sending the NFT away never resets that flag. `ownerMint(player)` works with free mint closed and does not consume the recipient's free-mint allocation. It cannot mint different stats or exceed the shared cap.
 
@@ -27,7 +104,7 @@ Only the actual ERC-721 owner can feed, start/cancel training, enqueue, or leave
 
 Food, transfers and new training are blocked while Training, Queued or Matched. Approvals may still change, but cannot bypass the transfer lock. No owner function can seize a pet or clear an active lock.
 
-## Food and hunger
+### Food and hunger
 
 Tier defaults are:
 
@@ -45,7 +122,7 @@ Hungry means `fedUntil == 0 || now > fedUntil`. Equality is still fed. Hungry pe
 
 Food proceeds are earned fees with no refund liability. Only `withdraw(amount)` sends ETH out, only to the current owner. It rejects zero/oversized amounts and failed transfers, and is reentrancy guarded. The NFT and queue have no payable receive/fallback. Forced ETH, if any, is also withdrawable by the NFT owner; it creates no user entitlement. MatchQueue never accepts or pays ETH.
 
-## Body score and effective weight
+### Body score and effective weight
 
 Body score `B` is an integer in [0,100]. It is distinct from uncapped stamina `S`. Each NFT stores `B` **and** a `WeightClass` enum:
 
@@ -79,7 +156,7 @@ After applying prior neglect:
 
 Higher food and larger recent training gains therefore improve health. Cheap food caps what training can build: a pet fed only tier 0 can train its stamina without limit, but its body score never rises above 60 (Normal), each low feed still costs 4, and any lapse in training costs 5 per day, so a long cheap-food diet drifts a Fit pet down to Normal and a neglected one on to Obese. Only mid or high food can make a pet Fit. With no training and a high feed every 72 hours, 15 inactivity damage exceeds the 12 food bonus, so the body still drifts toward Obese. Buying several feeds close together can counteract this; it is explicit game behavior. Long neglect saturates score at zero; food and training can always restore it after unlocking.
 
-## Training and overflow safety
+### Training and overflow safety
 
 Owner `startTraining` requires Idle, currently fed, and `fedUntil >= now + 21600`. It computes and stores:
 
@@ -99,7 +176,7 @@ At S=10, baseGain=10 and default tier gains are 10, 15 and 20. The base is monot
 
 Stamina storage and all additions are `uint256` with Solidity checked arithmetic. There is no `MAX_STAMINA`, saturation, narrowing cast or unchecked wrap. The denominator `10 + S/10` fits even for `uint256.max`; baseGain ≤11 and configured bps ≤50000 make the training product safe. At the theoretical uint256 arithmetic limit an addition reverts atomically; a training owner can still cancel. A race reward would similarly revert at that unreachable practical extreme rather than wrap or silently saturate. Starting at 10 with at most 52 stamina per six-hour training (50 from the multiplier plus at most 2 from the tier floor) makes that edge physically impractical. Tests exercise it using an unshipped test harness, including atomic rollback of both match rewards and points.
 
-## Queue and round protocol
+### Queue and round protocol
 
 Band key is `S / 25`: [0,24], [25,49], etc. Weight modifies racing rather than creating separate low-depth queues. A band can contain at most 32 waiting pets. `activeToken[player]` permits one waiting or matched pet per address across all bands, preventing self-matches by one address. Separate wallets remain Sybil-capable; there is no claim of person-level resistance.
 
@@ -119,7 +196,7 @@ Anyone can `requestRound(band)`:
 
 New entrants can form another round in the same band while older rounds are pending. Each round's storage, quota charge, seed and matches are independent. All loops are capped by the 32-player roster; no function scans all pets, bands, rounds or matches.
 
-## Future-block randomness and race formula
+### Future-block randomness and race formula
 
 Permissionless `fulfillRound(roundId)` requires Pending status and:
 
@@ -148,7 +225,7 @@ Higher score wins. On equality, A wins iff `keccak256(abi.encode(seed,"TIE",p)) 
 
 **Threat boundary:** a future block prevents participants knowing the exact seed before commitment, but block proposers/builders can bias or censor it. Fulfillment can also be withheld if every potential keeper declines to call. Anyone, including either player, can fulfill; there is no trusted designated keeper or private reveal secret. This is testnet randomness, not a VRF or a source for financially valuable outcomes.
 
-## Settlement, expiry, points and quotas
+### Settlement, expiry, points and quotas
 
 `settleMatch(matchId)` requires an existing unsettled match. It marks settled and clears address locks before rewarding either pet. The winner receives +3 stamina and +10 address points; the loser +1 stamina and +2 points. Points go to the owner snapshot taken at lock; transfers during the lock are impossible. The NFT applies elapsed neglect and returns to Idle. Food expiry, later weight changes, owner food config changes, and settlement timing cannot change stored race outcomes. Any reward failure reverts both rewards, points and settlement status atomically. The NFT reward methods cannot call ERC-721 receivers.
 
@@ -160,7 +237,7 @@ Weeks are `floor(block.timestamp / 604800)`, anchored to the Unix epoch (Thursda
 
 Points live in `points[address]`, `weeklyPoints[lockWeek][address]`, and `totalPoints`. There are no transfer, approval, redemption, burn or arbitrary award functions. Events support an off-chain weekly board; enumerating all addresses or ranking them on chain is intentionally omitted. No prize or token entitlement is attached. There is no optional 24-hour rematch cooldown; immediate rematches are possible while both NFT quotas allow them.
 
-## Operational boundaries
+### Operational boundaries
 
 Players or keepers pay transaction gas. Monitor `Enqueued`/`RoundLocked`/`MatchCreated`/`RoundBye`, request bands where `eligibleCount(band) >= 2`, fulfill in the 256-block window, and settle matches. Clean expired entries if a band fills up. There is no guarantee of queue depth at high stamina; players can leave waiting queues and retain their pets. Keepers can batch off chain, but each on-chain operation has bounded work.
 

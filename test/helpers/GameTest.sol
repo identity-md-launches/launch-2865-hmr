@@ -77,12 +77,18 @@ abstract contract GameTest is Test {
         return queue.roundMatchIds(roundId);
     }
 
+    /// @dev Advance past the anti-steering wait window so every waiting pet becomes lockable.
+    function _waitQueueWindow() internal {
+        vm.roll(vm.getBlockNumber() + queue.QUEUE_WAIT_BLOCKS());
+    }
+
     function _pair(address playerA, uint256 idA, address playerB, uint256 idB)
         internal
         returns (uint256 roundId)
     {
         _enqueue(playerA, idA);
         _enqueue(playerB, idB);
+        _waitQueueWindow();
         roundId = queue.requestRound(queue.bandOf(idA));
     }
 }

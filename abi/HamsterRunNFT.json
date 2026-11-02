@@ -25,6 +25,19 @@
   },
   {
     "type": "function",
+    "name": "LOW_FOOD_BODY_CEILING",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "MAX_SUPPLY",
     "inputs": [],
     "outputs": [
@@ -578,6 +591,19 @@
   },
   {
     "type": "function",
+    "name": "releaseBye",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "renounceOwnership",
     "inputs": [],
     "outputs": [],
@@ -1085,6 +1111,31 @@
   },
   {
     "type": "event",
+    "name": "MatchQuotaRefunded",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "week",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "used",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "MatchQuotaUsed",
     "inputs": [
       {
@@ -1422,6 +1473,11 @@
   {
     "type": "error",
     "name": "InvalidQueue",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidTier",
     "inputs": []
   },
   {

@@ -23,3 +23,5 @@ fail_on_revert = true
 line_length = 110
 tab_width = 4
 bracket_spacing = true
+# Vendored dependencies keep their exact upstream bytes (see dependencies.json); only project code is formatted.
+ignore = ["lib/**"]

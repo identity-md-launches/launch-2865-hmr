@@ -6,6 +6,36 @@ import { HamsterRunNFT } from "../src/HamsterRunNFT.sol";
 import { MatchQueue } from "../src/MatchQueue.sol";
 import { Activity, WeightClass } from "../src/GameMath.sol";
 
+/// @dev A contract wallet that tries to enter a band and lock the waiting pet in one transaction.
+contract QueueSniper {
+    HamsterRunNFT internal immutable nft;
+    MatchQueue internal immutable queue;
+    uint256 public id;
+
+    constructor(HamsterRunNFT nft_, MatchQueue queue_) payable {
+        nft = nft_;
+        queue = queue_;
+    }
+
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
+
+    function prepare() external {
+        id = nft.mint();
+        nft.feed{ value: 0.0003 ether }(id, 2);
+    }
+
+    function enter() external {
+        queue.enqueue(id);
+    }
+
+    function enterAndLock(uint256 band) external returns (uint256) {
+        queue.enqueue(id);
+        return queue.requestRound(band);
+    }
+}
+
 contract MatchQueueTest is GameTest {
     function test_endToEndMintFeedTrainQueueRandomMatchSettle() public {
         uint256 a = _mintFed(alice, 2);
@@ -83,6 +113,7 @@ contract MatchQueueTest is GameTest {
         vm.expectRevert(HamsterRunNFT.Locked.selector);
         nft.safeTransferFrom(alice, carol, a);
         _enqueue(bob, b);
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         vm.startPrank(alice);
         vm.expectRevert(MatchQueue.NotQueued.selector);
@@ -109,6 +140,7 @@ contract MatchQueueTest is GameTest {
         assertEq(queue.bandOf(b), 0);
         _enqueue(alice, a);
         _enqueue(bob, b);
+        _waitQueueWindow();
         vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
         queue.requestRound(0);
         vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
@@ -117,29 +149,143 @@ contract MatchQueueTest is GameTest {
         queue.requestRound(type(uint256).max);
     }
 
-    function test_oddQueueLeavesOneUnlockedWaitingEntryAndUpdatesSwapIndexes() public {
+    function test_oddRosterLocksEveryoneAndEntropyChoosesTheBye() public {
         uint256 a = _mintFed(alice, 0);
         uint256 b = _mintFed(bob, 0);
         uint256 c = _mintFed(carol, 0);
         _enqueue(alice, a);
         _enqueue(bob, b);
         _enqueue(carol, c);
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
-        MatchQueue.Snapshot[] memory racers = queue.roundRacers(round);
-        assertEq(racers.length, 2);
-        assertEq(racers[0].tokenId, a);
-        assertEq(racers[1].tokenId, b);
-        MatchQueue.Entry[] memory waiting = queue.queueEntries(0);
-        assertEq(waiting.length, 1);
-        assertEq(waiting[0].tokenId, c);
-        (uint256 band, uint256 index) = queue.position(c);
-        assertEq(band, 0);
-        assertEq(index, 1);
-        assertEq(nft.matchesThisWeek(c), 0);
-        vm.prank(carol);
-        queue.leaveQueue(c);
+        assertEq(queue.roundRacers(round).length, 3);
         assertEq(queue.queueEntries(0).length, 0);
+        assertEq(nft.matchesThisWeek(c), 1);
+        assertEq(uint256(nft.hamster(c).activity), uint256(Activity.Matched));
+        assertEq(queue.roundBye(round), 0);
+        (, uint256 target,,,,) = queue.roundInfo(round);
+        vm.roll(target + 1);
+        uint256 saved = vm.snapshotState();
+        bool byeVaries;
+        uint256 firstBye;
+        for (uint256 attempt; attempt < 12; ++attempt) {
+            assertTrue(vm.revertToState(saved));
+            vm.setBlockhash(target, keccak256(abi.encode("odd roster", attempt)));
+            vm.prank(keeper);
+            queue.fulfillRound(round);
+            uint256 bye = queue.roundBye(round);
+            assertTrue(bye == a || bye == b || bye == c);
+            if (attempt == 0) firstBye = bye;
+            else if (bye != firstBye) byeVaries = true;
+            uint256[] memory ids = queue.roundMatchIds(round);
+            assertEq(ids.length, 1);
+            MatchQueue.Race memory race = queue.matchInfo(ids[0]);
+            assertTrue(race.a.tokenId != bye && race.b.tokenId != bye);
+            // The bye is unlocked at once, keeps its attempt and earns nothing.
+            assertEq(uint256(nft.hamster(bye).activity), uint256(Activity.Idle));
+            assertEq(nft.matchesThisWeek(bye), 0);
+            assertEq(queue.activeToken(nft.ownerOf(bye)), 0);
+            assertEq(nft.hamster(bye).stamina, 10);
+            assertEq(uint256(nft.hamster(race.a.tokenId).activity), uint256(Activity.Matched));
+            queue.settleMatch(ids[0]);
+            assertEq(queue.totalPoints(), 12);
+            assertEq(queue.points(nft.ownerOf(bye)), 0);
+            assertEq(nft.matchesThisWeek(race.a.tokenId), 1);
+            // The bye can enter the next round immediately.
+            _enqueue(nft.ownerOf(bye), bye);
+        }
+        assertTrue(byeVaries, "entropy must choose the bye");
+    }
+
+    function test_expiredOddRoundReleasesEveryoneAndNobodyIsRefunded() public {
+        uint256 a = _mintFed(alice, 0);
+        uint256 b = _mintFed(bob, 0);
+        uint256 c = _mintFed(carol, 0);
+        _enqueue(alice, a);
+        _enqueue(bob, b);
+        _enqueue(carol, c);
+        _waitQueueWindow();
+        uint256 round = queue.requestRound(0);
+        (, uint256 target,,,,) = queue.roundInfo(round);
+        vm.roll(target + 257);
+        queue.expireRound(round);
+        assertEq(queue.roundBye(round), 0);
+        assertEq(nft.matchesThisWeek(a) + nft.matchesThisWeek(b) + nft.matchesThisWeek(c), 3);
         assertEq(uint256(nft.hamster(c).activity), uint256(Activity.Idle));
+        assertEq(queue.activeToken(carol), 0);
+    }
+
+    function test_cannotEnqueueAndLockInOneTransaction() public {
+        uint256 victim = _mintFed(alice, 0);
+        _enqueue(alice, victim);
+        _waitQueueWindow();
+        QueueSniper sniper = new QueueSniper{ value: 1 ether }(nft, queue);
+        sniper.prepare();
+        vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
+        sniper.enterAndLock(0);
+        assertEq(queue.queueEntries(0).length, 1);
+        assertEq(uint256(nft.hamster(victim).activity), uint256(Activity.Queued));
+        // Entered separately, the sniper's pet waits like anyone else and is not lockable before its window ends.
+        sniper.enter();
+        assertEq(queue.eligibleCount(0), 1);
+        assertEq(queue.queueEntries(0).length, 2);
+        vm.roll(vm.getBlockNumber() + queue.QUEUE_WAIT_BLOCKS() - 1);
+        vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
+        queue.requestRound(0);
+        assertEq(nft.matchesThisWeek(victim), 0);
+        vm.roll(vm.getBlockNumber() + 1);
+        assertEq(queue.eligibleCount(0), 2);
+        uint256 round = queue.requestRound(0);
+        assertEq(queue.roundRacers(round).length, 2);
+    }
+
+    function test_requestLocksWholeEligibleRosterSoLateEntrantCannotFlushTheQueue() public {
+        uint256 a = _mintFed(alice, 0);
+        uint256 b = _mintFed(bob, 0);
+        uint256 c = _mintFed(carol, 0);
+        _enqueue(alice, a);
+        _enqueue(bob, b);
+        _enqueue(carol, c);
+        _waitQueueWindow();
+        address attacker = makeAddr("attacker");
+        vm.deal(attacker, 1 ether);
+        uint256 d = _mintFed(attacker, 0);
+        _enqueue(attacker, d);
+        vm.prank(attacker);
+        uint256 round = queue.requestRound(0);
+        // All three eligible pets are committed together; the newcomer waits and cannot pick a leftover.
+        assertEq(queue.roundRacers(round).length, 3);
+        assertEq(queue.queueEntries(0).length, 1);
+        assertEq(queue.queueEntries(0)[0].tokenId, d);
+        assertEq(uint256(nft.hamster(d).activity), uint256(Activity.Queued));
+        vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
+        queue.requestRound(0);
+        _waitQueueWindow();
+        vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
+        queue.requestRound(0);
+        assertEq(nft.matchesThisWeek(d), 0);
+    }
+
+    function test_eligibilityIsPerEntryAndSurvivesSwapRemoval() public {
+        uint256 a = _mintFed(alice, 0);
+        uint256 b = _mintFed(bob, 0);
+        uint256 c = _mintFed(carol, 0);
+        _enqueue(alice, a);
+        _waitQueueWindow();
+        _enqueue(bob, b);
+        vm.roll(vm.getBlockNumber() + 3);
+        _enqueue(carol, c);
+        vm.prank(alice);
+        queue.leaveQueue(a); // swap-and-pop moves c into a's slot; c keeps its own join block
+        assertEq(queue.eligibleCount(0), 0);
+        vm.roll(vm.getBlockNumber() + queue.QUEUE_WAIT_BLOCKS() - 3);
+        assertEq(queue.eligibleCount(0), 1);
+        vm.expectRevert(MatchQueue.NotEnoughPlayers.selector);
+        queue.requestRound(0);
+        vm.roll(vm.getBlockNumber() + 3);
+        assertEq(queue.eligibleCount(0), 2);
+        uint256 round = queue.requestRound(0);
+        assertEq(queue.roundRacers(round).length, 2);
     }
 
     function test_leaveMiddleEntryRepairsPositionAndDoesNotConsumeQuota() public {
@@ -193,6 +339,7 @@ contract MatchQueueTest is GameTest {
         uint256 c = _mintFed(carol, 0);
         _enqueue(bob, b);
         _enqueue(carol, c);
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         assertEq(queue.roundRacers(round).length, 2);
         assertEq(queue.activeToken(alice), 0);
@@ -330,6 +477,7 @@ contract MatchQueueTest is GameTest {
         _enqueue(alice, a);
         _enqueue(bob, b);
         vm.warp(block.timestamp + 1);
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         (,, uint256 lockWeek,,,) = queue.roundInfo(round);
         (uint256 quotaWeek, uint256 used) = nft.matchQuota(a);
@@ -432,6 +580,7 @@ contract MatchQueueTest is GameTest {
         vm.prank(alice);
         vm.expectRevert(MatchQueue.QueueFull.selector);
         queue.enqueue(extra);
+        _waitQueueWindow();
         uint256 before = gasleft();
         uint256 round = queue.requestRound(0);
         uint256 lockGas = before - gasleft();

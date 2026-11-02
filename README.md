@@ -19,7 +19,7 @@ The NFT name is **HamsterRun**, symbol **HAM**, and lifetime supply limit **9999
 
 ## Build and check offline
 
-The root project pins Solidity **0.8.26**, Cancun, optimizer 200 runs, and `bytecode_hash = "none"`. It enables neither FFI nor filesystem cheatcode permissions. OpenZeppelin Contracts 5.1.0 and forge-std 1.9.7 are vendored as ordinary files with licenses and exact commits in [dependencies.json](dependencies.json). No package manager, submodule, RPC connection, key, or environment variable is needed for compilation or tests. The verifier supplies the pinned compiler.
+The root project pins Solidity **0.8.26**, Cancun, optimizer 200 runs, and `bytecode_hash = "none"`. It enables neither FFI nor filesystem cheatcode permissions. OpenZeppelin Contracts 5.1.0 and forge-std 1.9.7 are vendored as ordinary files with licenses and exact commits in [dependencies.json](dependencies.json); `forge fmt` is configured to ignore `lib/` so the vendored bytes stay byte-identical to the pinned archives. No package manager, submodule, RPC connection, key, or environment variable is needed for compilation or tests. The verifier supplies the pinned compiler.
 
 ```sh
 forge build
@@ -43,32 +43,33 @@ All arithmetic, rounding, time boundaries and state transitions are pinned in [D
 | --- | --- |
 | Free mint | Once per wallet, when `mintOpen`; transferring away does not reset it |
 | Owner mint | Available with mint closed; same 9999 total limit; no custom starting stats |
-| Starting pet | Stamina 10, Normal weight, body score 50, hungry until first feed |
+| Starting pet | Stamina 10, Normal weight, body score 50, hungry until first feed; no hunger damage during the first 72 hours after mint |
 | Stamina | `uint256`, checked growth, no gameplay ceiling |
 | Feeding | Exactly the tier price; resets expiry to `now + 72 hours`; excess ETH reverts |
 | Low / mid / high price | 0.0001 / 0.0002 / 0.0003 ETH |
 | Low / mid / high training multiplier | 10000 / 15000 / 20000 bps |
 | Training | Fixed 6 hours; must be fed through completion; permissionless settlement |
 | Base training gain | `1 + floor(100 / (10 + floor(stamina / 10)))` |
-| Final training gain | `floor(baseGain * lastFeedBps / 10000)` |
+| Final training gain | `floor(baseGain * lastFeedBps / 10000)`, lifted to at least one more than the next-lower tier's gain so tiers never collapse (10 / 15 / 20 at stamina 10; 1 / 2 / 3 from stamina 910) |
 | Weight | Fit (健美) at score ≥70; Normal (正常) at 35–69; Obese (肥胖) at 0–34 |
-| Weight pressure | Food −4 / +6 / +12; training `+2 + 2*tier + min(gain,10)`; neglect as below |
+| Weight pressure | Food −4 / +6 / +12; training `+2 + 2*tier + min(gain,10)`, capped at body score 60 when trained on low food; neglect as below |
 | Neglect | −5 per full day since last training settlement; additional −5 per begun hungry day |
 | Band | `floor(stamina / 25)`; weight modifies the race instead of fragmenting queues |
 | Queue | At most 32 waiting entries per band; one active pet per address across all bands |
 | Waiting expiry | Hungry or strictly older than 24 hours; owner can leave sooner |
-| Round | Largest even live prefix, 2–32 pets, all snapshotted before randomness |
+| Lock eligibility | A pet becomes lockable 10 blocks after it enqueued (`QUEUE_WAIT_BLOCKS`); entering and locking in one transaction is impossible |
+| Round | Every eligible live pet in the band, 2–32, odd counts included; all snapshotted before randomness; an odd roster's bye is drawn by the entropy, unlocked and refunded its attempt |
 | Entropy | Block `request block + 2`; fulfill from target+1 through target+256 inclusive |
-| Quota | 5 locked attempts per NFT per Unix-epoch week; expired attempts still count |
+| Quota | 5 locked attempts per NFT per Unix-epoch week; expired attempts still count; a bye's attempt is refunded |
 | Rewards | Winner: +3 stamina / +10 address points; loser: +1 stamina / +2 points |
 | Race score | `floor(stamina * (weightBps + noiseBps) / 20000)` |
 | Weight bps / noise | Fit 11500, Normal 10000, Obese 8500; independent noise −1000…+1000 |
 
 At equal stamina and equal noise, better weight cannot produce a lower score. The common score divisor 20000 preserves ordering and accommodates the entire `uint256` stamina domain. Tie results use a separate entropy-derived bit. Points are non-transferable counters, with a weekly mapping credited to the **round lock week**, not the settlement week.
 
-Low training causes deterioration even with high food at regular 72-hour intervals: 15 inactivity damage exceeds the 12 food benefit. Frequent paid feeds can improve weight faster; there is deliberately no feed cooldown. Body score is bounded to 0–100; stamina is not. No NFT burns on hunger.
+Low training causes deterioration even with high food at regular 72-hour intervals: 15 inactivity damage exceeds the 12 food benefit. Cheap food alone never makes a pet Fit: training on tier 0 cannot push the body score above 60, so a long cheap-food diet drifts toward Normal and, with any training lapse, on to Obese. Frequent paid feeds can improve weight faster; there is deliberately no feed cooldown. Body score is bounded to 0–100; stamina is not. No NFT burns on hunger.
 
-**Randomness is not a VRF or economically secure lottery.** Block proposers can bias or censor a future block, and an unfulfilled round can expire. Use this design only for this independent testnet game, without wagering, cash prizes, or promised token value. Callers cannot choose a seed, opponent, entropy block, or cancel after round lock. See [SECURITY.md](SECURITY.md) for the remaining trust assumptions.
+**Randomness is not a VRF or economically secure lottery.** Block proposers can bias or censor a future block, and an unfulfilled round can expire. Use this design only for this independent testnet game, without wagering, cash prizes, or promised token value. Callers cannot choose a seed, the entropy block, or a subset of the roster, and cannot cancel after round lock. A round locks every pet that has waited at least 10 blocks, so a caller cannot enter and lock atomically or flush a queue to isolate one opponent; when exactly two pets are waiting in a band they race each other, which is inherent to two-player pairing and visible in `queueEntries` before anyone joins. See [SECURITY.md](SECURITY.md) for the remaining trust assumptions.
 
 ## After launch
 
@@ -79,7 +80,7 @@ Use the confirmed application addresses from the network's deployment handoff. N
 | Owner | `HamsterRunNFT.setMatchQueue(queue)` **once** | Confirmed `MatchQueue` address; verify its bytecode and `nft()` binding first |
 | Owner | `setFoodConfig(uint256[3],uint256[3])` | Prices `[100000000000000,200000000000000,300000000000000]` wei; bps `[10000,15000,20000]`, as requested; constructors already set these defaults |
 | Owner | `setMintOpen(true)` | Opening decision; defaults to false |
-| Players / permissionless keeper | `requestRound(band)`, `fulfillRound(roundId)`, `settleMatch(matchId)` | Discover bands/rounds/matches from events and getters; fulfill before the blockhash window closes |
+| Players / permissionless keeper | `requestRound(band)`, `fulfillRound(roundId)`, `settleMatch(matchId)` | Request when `eligibleCount(band) >= 2`; discover rounds/matches/byes from events and getters; fulfill before the blockhash window closes |
 | Players / keeper | `evictExpired(tokenId)`, `expireRound(roundId)` | Clean stale waiting entries and recover missed randomness windows |
 | Owner | `withdraw(amount)` | Earned food fees, sent only to the current owner; no user escrow or prize pot |
 | Network deployer | Explorer source verification and address publication | Exact pinned build and actual deployment receipts; independent release review remains a separate step |
@@ -112,8 +113,8 @@ On Sepolia, after the owner setup above, two separate wallets can follow the sam
 1. Each calls `mint()`; read its token ID from the `Transfer` or `HamsterMinted` event. Assert starting stamina 10 with `hamster(tokenId)`.
 2. Each calls `feed(tokenId, 2)` with exactly **0.0003 ETH**, then `startTraining(tokenId)`. `training(tokenId)` returns the completion timestamp and snapshotted gain (20 at initial stamina with default high food).
 3. At or after `readyAt`, anyone calls `settleTraining(tokenId)` for each pet. Both now have stamina 30, putting them in band 1. `hamster` also returns effective weight and body score. The contract, not an off-chain timer, enforces the six hours; local tests advance simulated time.
-4. Each owner calls `MatchQueue.enqueue(tokenId)`. Anyone calls `requestRound(1)` and records `roundId` and `entropyBlock` from `RoundLocked`. No opponent ID is submitted.
+4. Each owner calls `MatchQueue.enqueue(tokenId)`. Ten blocks after the later entry, `eligibleCount(1)` reads 2 and anyone calls `requestRound(1)`, recording `roundId` and `entropyBlock` from `RoundLocked`. No opponent ID is submitted, and a request in the same block as an entry reverts with `NotEnoughPlayers`.
 5. After `entropyBlock`, and no later than `entropyBlock+256`, anyone calls `fulfillRound(roundId)`. Read IDs from `roundMatchIds(roundId)` or `MatchCreated`.
 6. Anyone calls `settleMatch(matchId)`. Check `matchInfo`, `points(wallet)`, `weeklyPoints(lockWeek,wallet)`, and `hamster(tokenId)`. The pair's combined stamina increased by 4, and its combined points by 12. Both NFTs are transferable again.
 
-If feeding expires before entry, feed again. If waiting becomes stale, leave or evict and requeue. If no keeper fulfills in time, call `expireRound`; pets unlock without rewards and their weekly attempt remains consumed. A low-population stamina band requires another live entry in that band; the owner cannot manually choose an opponent.
+If feeding expires before entry, feed again. If waiting becomes stale, leave or evict and requeue. If no keeper fulfills in time, call `expireRound`; pets unlock without rewards and their weekly attempt remains consumed. With three or more eligible pets the round takes all of them; an odd roster's bye is announced by `RoundBye` at fulfilment, returns to Idle with its attempt refunded, and can enqueue again. A low-population stamina band requires another live entry in that band; the owner cannot manually choose an opponent.

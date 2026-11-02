@@ -250,6 +250,110 @@ contract CareTest is GameTest {
         assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Obese));
     }
 
+    function test_newbornTakesNoHungerDamageDuringItsFirstFeedWindow() public {
+        uint256 id = _mint(alice);
+        uint256 bornAt = block.timestamp;
+        vm.warp(bornAt + 12);
+        assertEq(nft.hamster(id).bodyScore, 50);
+        assertTrue(nft.isHungry(id)); // still gated until the first feed
+        vm.warp(bornAt + nft.FEED_SECONDS());
+        assertEq(nft.hamster(id).bodyScore, 35); // three idle days only
+        vm.warp(bornAt + nft.FEED_SECONDS() + 1);
+        assertEq(nft.hamster(id).bodyScore, 30); // first begun hungry day after the window
+        _feed(alice, id, 2);
+        assertEq(nft.hamster(id).bodyScore, 42);
+        // A wallet that mints and feeds in separate blocks gets the documented start.
+        uint256 later = _mint(bob);
+        vm.warp(block.timestamp + 12);
+        _feed(bob, later, 2);
+        assertEq(nft.hamster(later).bodyScore, 62);
+        uint256 cheap = _mint(carol);
+        vm.warp(block.timestamp + 12);
+        for (uint256 i; i < 3; ++i) {
+            _feed(carol, cheap, 0);
+        }
+        assertEq(nft.hamster(cheap).bodyScore, 38);
+        assertEq(uint256(nft.hamster(cheap).weight), uint256(WeightClass.Normal));
+    }
+
+    function test_lowFoodOnlyTrainingNeverMakesAPetFit() public {
+        uint256 id = _mintFed(alice, 0); // 46
+        _train(alice, id);
+        assertEq(nft.hamster(id).bodyScore, 58);
+        _train(alice, id);
+        assertEq(nft.hamster(id).bodyScore, nft.LOW_FOOD_BODY_CEILING());
+        uint256 end = vm.getBlockTimestamp() + 60 days;
+        uint256 peak;
+        while (vm.getBlockTimestamp() < end) {
+            if (nft.hamster(id).fedUntil < vm.getBlockTimestamp() + nft.TRAIN_SECONDS()) {
+                _feed(alice, id, 0);
+            }
+            _train(alice, id);
+            uint256 score = nft.hamster(id).bodyScore;
+            if (score > peak) peak = score;
+        }
+        assertEq(peak, nft.LOW_FOOD_BODY_CEILING());
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Normal));
+        assertGt(nft.hamster(id).stamina, 500); // the stamina side of training is not capped by food
+        // Mid food from the same position lifts the ceiling immediately.
+        _feed(alice, id, 1);
+        _train(alice, id);
+        assertGt(nft.hamster(id).bodyScore, nft.LOW_FOOD_BODY_CEILING());
+    }
+
+    function test_fitPetSwitchedToCheapFoodDriftsDownToNormal() public {
+        uint256 id = _mintFed(alice, 2);
+        _feed(alice, id, 2);
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Fit)); // 74
+        uint256 ceiling = nft.LOW_FOOD_BODY_CEILING();
+        for (uint256 feedCount; feedCount < 6; ++feedCount) {
+            _feed(alice, id, 0);
+            for (uint256 session; session < 4; ++session) {
+                uint256 scoreBefore = nft.hamster(id).bodyScore;
+                _train(alice, id);
+                uint256 scoreAfter = nft.hamster(id).bodyScore;
+                // Cheap-food training never lifts the score above the ceiling.
+                assertLe(scoreAfter, scoreBefore > ceiling ? scoreBefore : ceiling);
+            }
+            if (feedCount > 0) assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Normal));
+            vm.warp(nft.hamster(id).fedUntil);
+        }
+        assertLe(nft.hamster(id).bodyScore, ceiling);
+        assertEq(uint256(nft.hamster(id).weight), uint256(WeightClass.Normal));
+    }
+
+    function test_tierBonusStaysStrictlyOrderedAtHighStamina() public {
+        HamsterHarness high = new HamsterHarness(owner);
+        vm.startPrank(owner);
+        uint256 low = high.ownerMint(alice);
+        uint256 mid = high.ownerMint(alice);
+        uint256 top = high.ownerMint(alice);
+        vm.stopPrank();
+        high.setStaminaForTest(low, 910);
+        high.setStaminaForTest(mid, 910);
+        high.setStaminaForTest(top, 910);
+        vm.startPrank(alice);
+        high.feed{ value: 0.0001 ether }(low, 0);
+        high.feed{ value: 0.0002 ether }(mid, 1);
+        high.feed{ value: 0.0003 ether }(top, 2);
+        assertEq(high.previewTrainingGain(low), 1);
+        assertEq(high.previewTrainingGain(mid), 2);
+        assertEq(high.previewTrainingGain(top), 3);
+        high.startTraining(mid);
+        vm.stopPrank();
+        (uint256 readyAt, uint256 gain,) = high.training(mid);
+        assertEq(gain, 2);
+        vm.warp(readyAt);
+        high.settleTraining(mid);
+        assertEq(high.hamster(mid).stamina, 912);
+        high.setStaminaForTest(low, 909);
+        high.setStaminaForTest(mid, 909);
+        high.setStaminaForTest(top, 909);
+        assertEq(high.previewTrainingGain(low), 2);
+        assertEq(high.previewTrainingGain(mid), 3);
+        assertEq(high.previewTrainingGain(top), 4);
+    }
+
     function test_staminaGrowsFarBeyondSmallIntegerLimits() public {
         HamsterHarness high = new HamsterHarness(owner);
         vm.prank(owner);
@@ -260,10 +364,10 @@ contract CareTest is GameTest {
         high.startTraining(id);
         vm.stopPrank();
         (uint256 readyAt, uint256 gain,) = high.training(id);
-        assertEq(gain, 2);
+        assertEq(gain, 3); // base 1 on high food: floors to 2, lifted to 3 so tiers stay distinct
         vm.warp(readyAt);
         high.settleTraining(id);
-        assertEq(high.hamster(id).stamina, uint256(type(uint128).max) + 12);
+        assertEq(high.hamster(id).stamina, uint256(type(uint128).max) + 13);
     }
 
     function test_uint256OverflowRevertsWithoutWrappingAndTrainingCanCancel() public {

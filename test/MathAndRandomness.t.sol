@@ -20,6 +20,50 @@ contract MathAndRandomnessTest is GameTest {
         if (bps < 50_000) assertGe(GameMath.trainingGain(stamina, bps + 1), gain);
     }
 
+    function testFuzz_tieredGainIsStrictlyIncreasingForAnyValidConfig(
+        uint256 stamina,
+        uint16 lowSeed,
+        uint16 midSeed,
+        uint16 highSeed
+    ) public pure {
+        // Any configuration setFoodConfig accepts: 10000 <= bps0 < bps1 < bps2 <= 50000.
+        uint256[3] memory bps;
+        bps[0] = 10_000 + uint256(lowSeed) % 39_999;
+        bps[1] = bps[0] + 1 + uint256(midSeed) % (50_000 - bps[0]);
+        bps[2] = bps[1] + 1 + uint256(highSeed) % (50_001 - bps[1]);
+        if (bps[2] > 50_000) bps[2] = 50_000;
+        if (bps[1] >= bps[2]) bps[1] = bps[2] - 1;
+        uint256 low = GameMath.tieredTrainingGain(stamina, bps, 0);
+        uint256 mid = GameMath.tieredTrainingGain(stamina, bps, 1);
+        uint256 high = GameMath.tieredTrainingGain(stamina, bps, 2);
+        assertEq(low, GameMath.trainingGain(stamina, bps[0]));
+        assertGe(mid, GameMath.trainingGain(stamina, bps[1]));
+        assertGe(high, GameMath.trainingGain(stamina, bps[2]));
+        assertGt(mid, low);
+        assertGt(high, mid);
+        assertGe(low, 1);
+        // Base is 11 below stamina 10 (pure-function domain) and at most 10 from the real start of 10.
+        assertLe(high, stamina < 10 ? 57 : 52);
+    }
+
+    function test_tieredGainPinnedValues() public pure {
+        uint256[3] memory bps = [uint256(10_000), 15_000, 20_000];
+        assertEq(GameMath.tieredTrainingGain(10, bps, 0), 10);
+        assertEq(GameMath.tieredTrainingGain(10, bps, 1), 15);
+        assertEq(GameMath.tieredTrainingGain(10, bps, 2), 20);
+        assertEq(GameMath.tieredTrainingGain(909, bps, 0), 2);
+        assertEq(GameMath.tieredTrainingGain(909, bps, 1), 3);
+        assertEq(GameMath.tieredTrainingGain(909, bps, 2), 4);
+        assertEq(GameMath.tieredTrainingGain(910, bps, 0), 1);
+        assertEq(GameMath.tieredTrainingGain(910, bps, 1), 2);
+        assertEq(GameMath.tieredTrainingGain(910, bps, 2), 3);
+        assertEq(GameMath.tieredTrainingGain(type(uint256).max, bps, 2), 3);
+        uint256[3] memory tight = [uint256(10_000), 10_001, 10_002];
+        assertEq(GameMath.tieredTrainingGain(10, tight, 0), 10);
+        assertEq(GameMath.tieredTrainingGain(10, tight, 1), 11);
+        assertEq(GameMath.tieredTrainingGain(10, tight, 2), 12);
+    }
+
     function testFuzz_raceMathIsOrderedAndSafeAtFullWidth(uint256 stamina, uint16 noiseSeed) public pure {
         uint256 noise = uint256(noiseSeed) % 2001;
         uint256 fit = GameMath.raceScore(stamina, WeightClass.Fit, noise);
@@ -55,6 +99,7 @@ contract MathAndRandomnessTest is GameTest {
             uint256 id = _mintFed(players[i], 0);
             _enqueue(players[i], id);
         }
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         uint256[] memory ids = _fulfill(round, entropy);
         assertEq(ids.length, count / 2);
@@ -108,6 +153,7 @@ contract MathAndRandomnessTest is GameTest {
             vm.deal(player, 1 ether);
             _enqueue(player, _mintFed(player, 0));
         }
+        _waitQueueWindow();
         uint256 round = queue.requestRound(0);
         (, uint256 target,,,,) = queue.roundInfo(round);
         vm.roll(target + 1);

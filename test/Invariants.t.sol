@@ -16,6 +16,7 @@ contract GameHandler is Test {
     uint256 public withdrawn;
     uint256 public totalTrainingGain;
     uint256 public settledRaces;
+    uint256 public byes;
     mapping(address => uint256) public expectedPoints;
     mapping(uint256 => uint256) public expectedStamina;
 
@@ -88,8 +89,10 @@ contract GameHandler is Test {
             if (
                 !nft.isHungry(entries[i].tokenId)
                     && vm.getBlockTimestamp() <= entries[i].joinedAt + queue.QUEUE_TTL()
+                    && vm.getBlockNumber() >= entries[i].joinedBlock + queue.QUEUE_WAIT_BLOCKS()
             ) ++live;
         }
+        assertEq(live, queue.eligibleCount(band));
         if (live >= 2) queue.requestRound(band);
     }
 
@@ -104,6 +107,12 @@ contract GameHandler is Test {
             } else {
                 vm.setBlockhash(target, keccak256(abi.encode("mock future block", target)));
                 queue.fulfillRound(round);
+                uint256 bye = queue.roundBye(round);
+                if (bye != 0) {
+                    ++byes;
+                    assertEq(uint256(nft.hamster(bye).activity), uint256(Activity.Idle));
+                    assertEq(queue.roundRacers(round).length % 2, 1);
+                }
             }
         } else if (status == MatchQueue.RoundStatus.Fulfilled) {
             uint256[] memory ids = queue.roundMatchIds(round);
@@ -173,6 +182,7 @@ contract GameInvariantTest is GameTest {
         }
         assertEq(queue.totalPoints(), pointsTotal);
         assertEq(pointsTotal, handler.settledRaces() * 12);
+        assertEq(queue.totalPoints() % 12, 0); // a bye never earns points
         assertEq(staminaTotal, 80 + handler.totalTrainingGain() + handler.settledRaces() * 4);
     }
 

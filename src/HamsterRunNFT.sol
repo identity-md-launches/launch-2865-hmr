@@ -22,6 +22,8 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
     uint256 public constant TRAIN_SECONDS = 6 hours;
     uint256 public constant WEEKLY_MATCH_LIMIT = 5;
     uint256 public constant MAX_TRAIN_BPS = 50_000;
+    /// @notice Training credit earned on low food never lifts the body score above this (Normal range).
+    uint256 public constant LOW_FOOD_BODY_CEILING = 60;
 
     struct Hamster {
         uint256 stamina;
@@ -95,6 +97,7 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
     event TrainingCancelled(uint256 indexed tokenId);
     event ActivityChanged(uint256 indexed tokenId, Activity activity);
     event MatchQuotaUsed(uint256 indexed tokenId, uint256 week, uint256 used);
+    event MatchQuotaRefunded(uint256 indexed tokenId, uint256 week, uint256 used);
     event MatchRewarded(uint256 indexed tokenId, uint256 gain, uint256 stamina);
     event Withdrawn(address indexed recipient, uint256 amount);
 
@@ -170,7 +173,7 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
         Hamster storage ham = _hamsters[tokenId];
         if (ham.fedUntil < readyAt) revert InsufficientFeedDuration();
         _syncBody(tokenId);
-        uint256 gain = GameMath.trainingGain(ham.stamina, ham.trainBps);
+        uint256 gain = _trainingGain(tokenId);
         training[tokenId] = Training(readyAt, gain, ham.foodTier);
         _setActivity(tokenId, Activity.Training);
         emit TrainingStarted(tokenId, readyAt, gain);
@@ -187,7 +190,9 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
         // Intentionally checked uint256 addition: no artificial stamina ceiling and no wraparound.
         ham.stamina += work.gain;
         uint256 gainCredit = work.gain > 10 ? 10 : work.gain;
-        _improveBody(tokenId, 2 + 2 * uint256(work.tier) + gainCredit);
+        // Cheap food caps the health training can build: only mid/high food can make a pet Fit.
+        uint256 ceiling = work.tier == 0 ? LOW_FOOD_BODY_CEILING : 100;
+        _improveBody(tokenId, 2 + 2 * uint256(work.tier) + gainCredit, ceiling);
         CareClock storage clock = _careClocks[tokenId];
         clock.lastTrainAt = block.timestamp;
         clock.idleDaysApplied = 0;
@@ -248,6 +253,14 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
         _release(tokenId, Activity.Matched);
     }
 
+    /// @notice The odd pet of a fulfilled round raced nobody: unlock it and hand back its weekly attempt.
+    function releaseBye(uint256 tokenId) external nonReentrant onlyMatchQueue {
+        _release(tokenId, Activity.Matched);
+        Quota storage quota = matchQuota[tokenId];
+        if (quota.used > 0) --quota.used;
+        emit MatchQuotaRefunded(tokenId, quota.week, quota.used);
+    }
+
     function rewardMatch(uint256 tokenId, bool won) external nonReentrant onlyMatchQueue {
         _requireOwned(tokenId);
         if (_hamsters[tokenId].activity != Activity.Matched) revert WrongActivity();
@@ -291,8 +304,7 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
 
     function previewTrainingGain(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
-        Hamster storage ham = _hamsters[tokenId];
-        return GameMath.trainingGain(ham.stamina, ham.trainBps);
+        return _trainingGain(tokenId);
     }
 
     function tokenURI(uint256 tokenId) public view override returns (string memory) {
@@ -325,6 +337,15 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
         emit HamsterMinted(tokenId, player, free);
     }
 
+    /// @dev The pet's own tier uses the multiplier captured at its last feed; lower tiers use the current
+    ///      configuration only as a strict floor, so a better tier is never equal to a worse one.
+    function _trainingGain(uint256 tokenId) private view returns (uint256) {
+        Hamster storage ham = _hamsters[tokenId];
+        uint256[3] memory bpsByTier = foodTrainBps;
+        bpsByTier[ham.foodTier] = ham.trainBps;
+        return GameMath.tieredTrainingGain(ham.stamina, bpsByTier, ham.foodTier);
+    }
+
     function _requireOwnerIdle(uint256 tokenId) private view {
         if (ownerOf(tokenId) != msg.sender) revert NotTokenOwner();
         if (_hamsters[tokenId].activity != Activity.Idle) revert Locked();
@@ -354,7 +375,8 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
         Hamster storage ham = _hamsters[tokenId];
         CareClock storage clock = _careClocks[tokenId];
         idleDays = (block.timestamp - clock.lastTrainAt) / 1 days;
-        uint256 hungerStart = ham.fedUntil == 0 ? clock.bornAt : ham.fedUntil;
+        // A never-fed newborn is hungry for gameplay gates, but its first feed window carries no damage.
+        uint256 hungerStart = ham.fedUntil == 0 ? clock.bornAt + FEED_SECONDS : ham.fedUntil;
         if (block.timestamp > hungerStart) hungerDays = 1 + (block.timestamp - hungerStart - 1) / 1 days;
         uint256 damage = (idleDays - clock.idleDaysApplied) * 5 + (hungerDays - clock.hungerDaysApplied) * 5;
         score = damage >= ham.bodyScore ? 0 : ham.bodyScore - damage;
@@ -374,8 +396,14 @@ contract HamsterRunNFT is ERC721, Ownable2Step, ReentrancyGuard {
     }
 
     function _improveBody(uint256 tokenId, uint256 gain) private {
+        _improveBody(tokenId, gain, 100);
+    }
+
+    /// @dev Raises the score by `gain` but never above `ceiling`; a score already above it is left alone.
+    function _improveBody(uint256 tokenId, uint256 gain, uint256 ceiling) private {
         uint256 score = _hamsters[tokenId].bodyScore;
-        _setBody(tokenId, gain >= 100 - score ? 100 : score + gain);
+        if (score >= ceiling) return;
+        _setBody(tokenId, gain >= ceiling - score ? ceiling : score + gain);
     }
 
     function _setBody(uint256 tokenId, uint256 score) private {

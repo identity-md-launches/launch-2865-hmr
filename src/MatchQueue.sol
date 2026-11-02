@@ -13,6 +13,8 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
     uint256 public constant BAND_WIDTH = 25;
     uint256 public constant MAX_QUEUE_SIZE = 32;
     uint256 public constant QUEUE_TTL = 24 hours;
+    /// @notice Blocks a pet must wait after enqueue before any round may lock it (about 2 minutes on Sepolia).
+    uint256 public constant QUEUE_WAIT_BLOCKS = 10;
     uint256 public constant RANDOM_DELAY = 2;
     uint256 public constant RANDOM_WINDOW = 256;
     uint256 public constant WIN_POINTS = 10;
@@ -29,6 +31,7 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
         uint256 tokenId;
         address player;
         uint256 joinedAt;
+        uint256 joinedBlock;
     }
 
     struct Position {
@@ -49,6 +52,7 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
         uint256 week;
         RoundStatus status;
         bytes32 seed;
+        uint256 byeTokenId;
         Snapshot[] racers;
         uint256[] matchIds;
     }
@@ -92,6 +96,7 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
     event LeftQueue(uint256 indexed tokenId, address indexed player, bool expired);
     event RoundLocked(uint256 indexed roundId, uint256 indexed band, uint256 entropyBlock, uint256 count);
     event RoundFulfilled(uint256 indexed roundId, bytes32 seed);
+    event RoundBye(uint256 indexed roundId, uint256 indexed tokenId, address indexed player);
     event RoundExpired(uint256 indexed roundId);
     event MatchCreated(uint256 indexed matchId, uint256 indexed roundId, uint256 tokenA, uint256 tokenB);
     event MatchSettled(uint256 indexed matchId, uint256 indexed winner, uint256 scoreA, uint256 scoreB);
@@ -108,7 +113,7 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
         uint256 band = bandOf(tokenId);
         if (_queues[band].length >= MAX_QUEUE_SIZE) revert QueueFull();
         activeToken[msg.sender] = tokenId;
-        _queues[band].push(Entry(tokenId, msg.sender, block.timestamp));
+        _queues[band].push(Entry(tokenId, msg.sender, block.timestamp, block.number));
         position[tokenId] = Position(band, _queues[band].length);
         emit Enqueued(tokenId, msg.sender, band);
         // NFT checks fed state, training/queue locks and quota. Failure rolls back all queue effects.
@@ -134,12 +139,18 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
         _unlockEntry(entry, true);
     }
 
-    /// @notice Lock the largest even prefix (up to 32) of the band's current live roster.
-    /// @dev The caller selects only a band. All snapshots precede the future entropy block.
+    /// @notice Lock every live pet in the band that has waited at least QUEUE_WAIT_BLOCKS (up to 32).
+    /// @dev The caller selects only a band, never a subset: the whole eligible roster is committed, an
+    ///      odd roster gets one entropy-chosen bye at fulfilment, and a pet enqueued in this block is not
+    ///      eligible yet, so nobody can enter and lock in one transaction. Snapshots precede the entropy block.
     function requestRound(uint256 band) external nonReentrant returns (uint256 roundId) {
         _prune(band);
-        uint256 count = _queues[band].length;
-        count -= count % 2;
+        Entry[] storage entries = _queues[band];
+        uint256[] memory selected = new uint256[](entries.length);
+        uint256 count;
+        for (uint256 i = 0; i < entries.length; ++i) {
+            if (_eligible(entries[i])) selected[count++] = entries[i].tokenId;
+        }
         if (count < 2) revert NotEnoughPlayers();
         roundId = ++roundCount;
         Round storage round = _rounds[roundId];
@@ -148,11 +159,7 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
         round.week = block.timestamp / 1 weeks;
         round.status = RoundStatus.Pending;
 
-        // Capture the prefix before removal (removal swaps the last entry into the freed slot).
-        uint256[] memory selected = new uint256[](count);
-        for (uint256 i = 0; i < count; ++i) {
-            selected[i] = _queues[band][i].tokenId;
-        }
+        // IDs were captured before removal (removal swaps the last entry into the freed slot).
         for (uint256 i = 0; i < count; ++i) {
             uint256 tokenId = selected[i];
             _removeAt(band, position[tokenId].indexPlusOne - 1);
@@ -179,10 +186,19 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
             uint256 j = uint256(keccak256(abi.encode(seed, "PAIR", i))) % (i + 1);
             (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]);
         }
-        for (uint256 i = 0; i < shuffled.length; i += 2) {
+        uint256 paired = shuffled.length - shuffled.length % 2;
+        for (uint256 i = 0; i < paired; i += 2) {
             _createMatch(roundId, seed, i / 2, shuffled[i], shuffled[i + 1]);
         }
         emit RoundFulfilled(roundId, seed);
+        if (paired < shuffled.length) {
+            // The shuffle, not the caller, decides who sits out; the bye keeps its weekly attempt.
+            Snapshot memory bye = shuffled[paired];
+            round.byeTokenId = bye.tokenId;
+            delete activeToken[bye.player];
+            emit RoundBye(roundId, bye.tokenId, bye.player);
+            nft.releaseBye(bye.tokenId);
+        }
     }
 
     /// @notice If everyone misses the hash window, unlock with no reward; quota stays consumed.
@@ -222,6 +238,19 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
 
     function queueEntries(uint256 band) external view returns (Entry[] memory) {
         return _queues[band];
+    }
+
+    /// @notice Pets a `requestRound(band)` call would lock right now: live and past their wait window.
+    function eligibleCount(uint256 band) external view returns (uint256 count) {
+        Entry[] storage entries = _queues[band];
+        for (uint256 i = 0; i < entries.length; ++i) {
+            if (!_expired(entries[i]) && _eligible(entries[i])) ++count;
+        }
+    }
+
+    /// @notice Token that sat out a fulfilled odd round, or 0 when every racer was paired.
+    function roundBye(uint256 roundId) external view returns (uint256) {
+        return _existingRound(roundId).byeTokenId;
     }
 
     function roundInfo(uint256 roundId)
@@ -300,6 +329,10 @@ contract MatchQueue is PointsLedger, ReentrancyGuard {
 
     function _expired(Entry memory entry) private view returns (bool) {
         return block.timestamp > entry.joinedAt + QUEUE_TTL || nft.isHungry(entry.tokenId);
+    }
+
+    function _eligible(Entry memory entry) private view returns (bool) {
+        return block.number >= entry.joinedBlock + QUEUE_WAIT_BLOCKS;
     }
 
     function _prune(uint256 band) private {
